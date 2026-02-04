@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Expert Paris Sportifs - Version GitHub Actions"""
+
+import smtplib, os
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from datetime import datetime
+from math import exp, factorial
+
+# Configuration via variables d'environnement GitHub
+EMAIL_DESTINATAIRE = os.environ.get("EMAIL_DESTINATAIRE", "am.lounnas@gmail.com")
+EMAIL_EXPEDITEUR = os.environ.get("EMAIL_EXPEDITEUR", "")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
+
+TEAMS = {
+    "Lens": {"rank": 1, "xg": 1.58, "xga": 0.72, "form_score": 1.0, "home_goals": 1.78, "away_goals": 1.20, "goals_against": 13, "matches": 19},
+    "PSG": {"rank": 2, "xg": 2.05, "xga": 0.78, "form_score": 0.87, "home_goals": 2.67, "away_goals": 1.27, "goals_against": 14, "matches": 19},
+    "Marseille": {"rank": 3, "xg": 2.35, "xga": 1.05, "form_score": 0.80, "home_goals": 2.44, "away_goals": 2.11, "goals_against": 18, "matches": 18},
+    "Monaco": {"rank": 4, "xg": 1.62, "xga": 1.18, "form_score": 0.60, "home_goals": 1.89, "away_goals": 1.44, "goals_against": 22, "matches": 19},
+    "Lille": {"rank": 5, "xg": 1.52, "xga": 1.08, "form_score": 0.60, "home_goals": 1.78, "away_goals": 1.20, "goals_against": 20, "matches": 19},
+    "Lyon": {"rank": 6, "xg": 1.68, "xga": 1.35, "form_score": 0.53, "home_goals": 2.00, "away_goals": 1.30, "goals_against": 25, "matches": 19},
+    "Strasbourg": {"rank": 7, "xg": 1.45, "xga": 1.35, "form_score": 0.60, "home_goals": 1.67, "away_goals": 1.20, "goals_against": 25, "matches": 19},
+}
+
+FIXTURES = [
+    {"date": "07/02/2026 21:00", "home": "PSG", "away": "Marseille", "context": "LE CLASSIQUE"},
+    {"date": "08/02/2026 17:00", "home": "Lens", "away": "Lyon", "context": ""},
+    {"date": "08/02/2026 21:00", "home": "Monaco", "away": "Lille", "context": ""},
+    {"date": "15/02/2026 21:00", "home": "Marseille", "away": "Strasbourg", "context": ""},
+]
+
+MARKET_ODDS = {
+    "PSG vs Marseille": {"1": 1.85, "2": 4.20, "O2.5": 1.55, "BTTS": 1.70},
+    "Lens vs Lyon": {"1": 1.70, "2": 4.80, "O2.5": 1.95, "BTTS": 1.80},
+    "Monaco vs Lille": {"1": 2.10, "2": 3.40, "O2.5": 1.90, "BTTS": 1.75},
+    "Marseille vs Strasbourg": {"1": 1.50, "2": 6.50, "O2.5": 1.60, "BTTS": 1.80},
+}
+
+def poisson_prob(lam, k):
+    return (lam ** k) * exp(-lam) / factorial(k)
+
+def analyze():
+    bets = []
+    for f in FIXTURES:
+        h, a = TEAMS.get(f["home"], {}), TEAMS.get(f["away"], {})
+        if not h or not a: continue
+        lam_h = ((h["xg"]*0.6 + h["home_goals"]*0.4) + (a["xga"]*0.6 + a["goals_against"]/a["matches"]*0.4)) / 2 * 1.1 * (0.85 + h["form_score"]*0.3)
+        lam_a = ((a["xg"]*0.6 + a["away_goals"]*0.4) + (h["xga"]*0.6 + h["goals_against"]/h["matches"]*0.4)) / 2 * 0.95 * (0.85 + a["form_score"]*0.3)
+        probs = {"home": 0, "away": 0, "over25": 0, "btts": 0}
+        for hg in range(7):
+            for ag in range(7):
+                p = poisson_prob(lam_h, hg) * poisson_prob(lam_a, ag)
+                if hg > ag: probs["home"] += p
+                elif hg < ag: probs["away"] += p
+                if hg + ag > 2.5: probs["over25"] += p
+                if hg > 0 and ag > 0: probs["btts"] += p
+        match = f"{f['home']} vs {f['away']}"
+        odds = MARKET_ODDS.get(match, {})
+        for key, label, odd_key in [("home", f"Victoire {f['home']}", "1"), ("over25", "Plus de 2.5 buts", "O2.5"), ("btts", "Les 2 marquent", "BTTS")]:
+            prob, odd = probs[key], odds.get(odd_key, 2.0)
+            value = prob * odd - 1
+            if value > 0.05:
+                bets.append({"match": match, "date": f["date"], "bet": label, "prob": prob, "odds": odd, "value": value, "context": f.get("context", "")})
+    return sorted(bets, key=lambda x: x["value"], reverse=True)[:5]
+
+def generate_html(bets):
+    rows = "".join([f'<tr><td>#{i}</td><td><b>{b["match"]}</b><br><small>{b["date"]}</small></td><td><b>{b["bet"]}</b><br><small>Prob: {b["prob"]*100:.0f}%</small></td><td style="text-align:center"><span style="background:#007bff;color:white;padding:5px 10px;border-radius:5px">{b["odds"]:.2f}</span></td><td style="text-align:center"><span style="background:#28a745;color:white;padding:5px 10px;border-radius:5px">+{b["value"]*100:.1f}%</span></td></tr>' for i, b in enumerate(bets, 1)])
+    return f'<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body style="font-family:Arial;background:#f5f5f5;padding:20px"><div style="max-width:700px;margin:auto;background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,0.1)"><div style="background:linear-gradient(135deg,#1a1a2e,#16213e);color:white;padding:30px;text-align:center"><h1>🏆 Expert Paris Sportifs</h1><p>Analyse du {datetime.now().strftime("%d/%m/%Y")}</p></div><div style="padding:20px"><h2>🎯 Top 5 Paris Recommandés</h2><table style="width:100%;border-collapse:collapse"><tr style="background:#f8f9fa"><th>#</th><th>Match</th><th>Pari</th><th>Cote</th><th>Value</th></tr>{rows}</table><div style="background:#fff3cd;border-left:4px solid #ffc107;padding:15px;margin:20px 0"><b>⚠️ Rappel:</b> Les paris comportent des risques. Ne misez que ce que vous pouvez perdre.</div></div><div style="background:#f8f9fa;padding:15px;text-align:center;font-size:12px">Généré automatiquement</div></div></body></html>'
+
+def send_email(html):
+    if not EMAIL_EXPEDITEUR or not EMAIL_PASSWORD:
+        print("❌ Credentials manquants")
+        return False
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = f"🏆 Paris Sportifs - {datetime.now().strftime('%d/%m/%Y')}"
+    msg['From'], msg['To'] = EMAIL_EXPEDITEUR, EMAIL_DESTINATAIRE
+    msg.attach(MIMEText(html, 'html'))
+    try:
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+        server.login(EMAIL_EXPEDITEUR, EMAIL_PASSWORD)
+        server.sendmail(EMAIL_EXPEDITEUR, EMAIL_DESTINATAIRE, msg.as_string())
+        server.quit()
+        print(f"✅ Email envoyé à {EMAIL_DESTINATAIRE}")
+        return True
+    except Exception as e:
+        print(f"❌ Erreur: {e}")
+        return False
+
+if __name__ == "__main__":
+    print("🏆 Expert Paris Sportifs")
+    bets = analyze()
+    print(f"📊 {len(bets)} paris trouvés")
+    for i, b in enumerate(bets, 1):
+        print(f"  {i}. {b['match']} | {b['bet']} @ {b['odds']:.2f} | Value: +{b['value']*100:.1f}%")
+    html = generate_html(bets)
+    send_email(html)
