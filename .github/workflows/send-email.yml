@@ -20,4 +20,5 @@ jobs:
         EMAIL_EXPEDITEUR: ${{ secrets.EMAIL_EXPEDITEUR }}
         EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
         EMAIL_DESTINATAIRE: "am.lounnas@gmail.com"
+        FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
       run: python email
