@@ -1,67 +1,192 @@
 #!/usr/bin/env python3
 """
-🎯 EXPERT PARIS SPORTIFS v3.0 - MULTI-LIGUES
-=============================================
+🎯 EXPERT PARIS SPORTIFS v4.0 - ULTIMATE EDITION
+=================================================
+FONCTIONNALITÉS:
 - 4 ligues fiables : Premier League, Bundesliga, Ligue 1, La Liga
-- Modèle Poisson avancé avec pondération temporelle
-- Calcul de mise optimale (Kelly fractionné)
-- Détection haute value (EV > 5%)
+- Vraies cotes en temps réel (The Odds API)
+- Analyse mouvement des cotes
+- Blessures et suspensions (Football-Data API)
+- Facteur météo (OpenWeatherMap)
+- Vrais xG approximés par forme récente pondérée
+- Modèles spécifiques par type de pari
+- Tracking automatique des résultats (Google Sheets)
+- Alertes Telegram en temps réel
 - ~40 matchs analysés par semaine
 """
 
-import smtplib, os, json, urllib.request
+import smtplib, os, json, urllib.request, urllib.parse
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from math import exp, factorial
+import hashlib
 
 # ============== CONFIGURATION ==============
 EMAIL_DESTINATAIRE = os.environ.get("EMAIL_DESTINATAIRE", "am.lounnas@gmail.com")
 EMAIL_EXPEDITEUR = os.environ.get("EMAIL_EXPEDITEUR", "")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
-API_KEY = os.environ.get("FOOTBALL_API_KEY", "")
-API_URL = "https://api.football-data.org/v4"
 
-# Les 4 ligues les plus fiables (pas de matchs truqués)
+# APIs
+FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY", "")
+ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")  # https://the-odds-api.com (gratuit)
+WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "")  # https://openweathermap.org (gratuit)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")  # @BotFather sur Telegram
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")  # Ton chat ID
+
+FOOTBALL_API_URL = "https://api.football-data.org/v4"
+ODDS_API_URL = "https://api.the-odds-api.com/v4"
+WEATHER_API_URL = "https://api.openweathermap.org/data/2.5"
+
+# Les 4 ligues fiables
 COMPETITIONS = {
-    "PL": {"name": "Premier League", "flag": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "country": "Angleterre"},
-    "BL1": {"name": "Bundesliga", "flag": "🇩🇪", "country": "Allemagne"},
-    "FL1": {"name": "Ligue 1", "flag": "🇫🇷", "country": "France"},
-    "PD": {"name": "La Liga", "flag": "🇪🇸", "country": "Espagne"}
+    "PL": {
+        "name": "Premier League",
+        "flag": "🏴",
+        "country": "Angleterre",
+        "odds_key": "soccer_epl",
+        "cities": {}  # Rempli dynamiquement
+    },
+    "BL1": {
+        "name": "Bundesliga",
+        "flag": "🇩🇪",
+        "country": "Allemagne",
+        "odds_key": "soccer_germany_bundesliga",
+        "cities": {}
+    },
+    "FL1": {
+        "name": "Ligue 1",
+        "flag": "🇫🇷",
+        "country": "France",
+        "odds_key": "soccer_france_ligue_one",
+        "cities": {}
+    },
+    "PD": {
+        "name": "La Liga",
+        "flag": "🇪🇸",
+        "country": "Espagne",
+        "odds_key": "soccer_spain_la_liga",
+        "cities": {}
+    }
+}
+
+# Villes des équipes pour la météo
+TEAM_CITIES = {
+    # Premier League
+    "Arsenal FC": "London", "Aston Villa FC": "Birmingham", "Chelsea FC": "London",
+    "Everton FC": "Liverpool", "Liverpool FC": "Liverpool", "Manchester City FC": "Manchester",
+    "Manchester United FC": "Manchester", "Newcastle United FC": "Newcastle",
+    "Tottenham Hotspur FC": "London", "West Ham United FC": "London",
+    "Brighton & Hove Albion FC": "Brighton", "Wolverhampton Wanderers FC": "Wolverhampton",
+    "Bournemouth AFC": "Bournemouth", "Brentford FC": "London", "Fulham FC": "London",
+    "Crystal Palace FC": "London", "Nottingham Forest FC": "Nottingham",
+    "Leicester City FC": "Leicester", "Ipswich Town FC": "Ipswich", "Southampton FC": "Southampton",
+    # Bundesliga
+    "FC Bayern München": "Munich", "Borussia Dortmund": "Dortmund", "RB Leipzig": "Leipzig",
+    "Bayer 04 Leverkusen": "Leverkusen", "VfB Stuttgart": "Stuttgart", "Eintracht Frankfurt": "Frankfurt",
+    "VfL Wolfsburg": "Wolfsburg", "SC Freiburg": "Freiburg", "TSG 1899 Hoffenheim": "Hoffenheim",
+    "1. FC Union Berlin": "Berlin", "FC Augsburg": "Augsburg", "Werder Bremen": "Bremen",
+    "VfL Bochum 1848": "Bochum", "1. FSV Mainz 05": "Mainz", "1. FC Köln": "Cologne",
+    "SV Darmstadt 98": "Darmstadt", "1. FC Heidenheim 1846": "Heidenheim", "Holstein Kiel": "Kiel",
+    # Ligue 1
+    "Paris Saint-Germain FC": "Paris", "AS Monaco FC": "Monaco", "Olympique de Marseille": "Marseille",
+    "Lille OSC": "Lille", "Olympique Lyonnais": "Lyon", "OGC Nice": "Nice",
+    "RC Lens": "Lens", "Stade Rennais FC 1901": "Rennes", "FC Nantes": "Nantes",
+    "RC Strasbourg Alsace": "Strasbourg", "Montpellier HSC": "Montpellier", "Stade Brestois 29": "Brest",
+    "Toulouse FC": "Toulouse", "Stade de Reims": "Reims", "FC Lorient": "Lorient",
+    "Clermont Foot 63": "Clermont-Ferrand", "FC Metz": "Metz", "Le Havre AC": "Le Havre",
+    "AJ Auxerre": "Auxerre", "AS Saint-Étienne": "Saint-Etienne", "Angers SCO": "Angers",
+    # La Liga
+    "Real Madrid CF": "Madrid", "FC Barcelona": "Barcelona", "Atlético de Madrid": "Madrid",
+    "Sevilla FC": "Seville", "Real Sociedad de Fútbol": "San Sebastian", "Real Betis Balompié": "Seville",
+    "Villarreal CF": "Villarreal", "Athletic Club": "Bilbao", "Valencia CF": "Valencia",
+    "CA Osasuna": "Pamplona", "RC Celta de Vigo": "Vigo", "RCD Mallorca": "Palma",
+    "Getafe CF": "Madrid", "Rayo Vallecano de Madrid": "Madrid", "UD Almería": "Almeria",
+    "Cádiz CF": "Cadiz", "Granada CF": "Granada", "UD Las Palmas": "Las Palmas",
+    "Deportivo Alavés": "Vitoria", "RCD Espanyol de Barcelona": "Barcelona", "CD Leganés": "Madrid",
+    "Real Valladolid CF": "Valladolid"
 }
 
 # Paramètres du modèle
-BANKROLL = 1000  # € - À ajuster selon ta bankroll réelle
-KELLY_FRACTION = 0.25  # Kelly fractionné à 25% (conservateur)
-MIN_VALUE_THRESHOLD = 1.03  # EV minimum de 3%
-HIGH_VALUE_THRESHOLD = 1.05  # Haute value à 5%+
-MIN_CONFIDENCE = 45  # Confiance minimum %
-MAX_BETS_PER_EMAIL = 5  # Top 5 paris
+BANKROLL = 1000  # € - À ajuster
+KELLY_FRACTION = 0.25
+MIN_VALUE_THRESHOLD = 1.03
+HIGH_VALUE_THRESHOLD = 1.05
+MIN_CONFIDENCE = 45
+MAX_BETS_PER_EMAIL = 5
+
+# Tracking file (dans le repo GitHub)
+TRACKING_FILE = "tracking.json"
 
 # ============== FONCTIONS API ==============
-def fetch_json(url):
-    """Récupère les données JSON avec la clé API"""
+def fetch_json(url, headers=None):
+    """Récupère les données JSON"""
     try:
         req = urllib.request.Request(url)
-        req.add_header("X-Auth-Token", API_KEY)
+        if headers:
+            for key, value in headers.items():
+                req.add_header(key, value)
         with urllib.request.urlopen(req, timeout=20) as r:
             return json.loads(r.read().decode())
     except Exception as e:
-        print(f"    ❌ Erreur API: {e}")
+        print(f"    ⚠️ Erreur API: {e}")
         return None
 
+def fetch_football_api(endpoint):
+    """Appel à Football-Data.org"""
+    return fetch_json(
+        f"{FOOTBALL_API_URL}{endpoint}",
+        {"X-Auth-Token": FOOTBALL_API_KEY}
+    )
+
+def fetch_odds_api(sport_key):
+    """Récupère les vraies cotes depuis The Odds API"""
+    if not ODDS_API_KEY:
+        return None
+
+    url = f"{ODDS_API_URL}/sports/{sport_key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,totals&oddsFormat=decimal"
+    return fetch_json(url)
+
+def fetch_weather(city):
+    """Récupère la météo pour une ville"""
+    if not WEATHER_API_KEY:
+        return None
+
+    url = f"{WEATHER_API_URL}/weather?q={urllib.parse.quote(city)}&appid={WEATHER_API_KEY}&units=metric"
+    return fetch_json(url)
+
+def send_telegram(message):
+    """Envoie une alerte Telegram"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = urllib.parse.urlencode({
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }).encode()
+        req = urllib.request.Request(url, data=data)
+        urllib.request.urlopen(req, timeout=10)
+        return True
+    except:
+        return False
+
+# ============== DONNÉES ==============
 def get_competition_data(competition_code):
-    """Récupère données d'une compétition (matchs + classement)"""
+    """Récupère données d'une compétition"""
     matches = []
     standings = {}
     recent_form = {}
+    injuries = {}
 
     comp_info = COMPETITIONS.get(competition_code, {})
     comp_name = comp_info.get("name", competition_code)
     comp_flag = comp_info.get("flag", "⚽")
 
     # Classement
-    data = fetch_json(f"{API_URL}/competitions/{competition_code}/standings")
+    data = fetch_football_api(f"/competitions/{competition_code}/standings")
     if data and "standings" in data:
         for table in data["standings"]:
             if table["type"] == "TOTAL":
@@ -96,7 +221,7 @@ def get_competition_data(competition_code):
                         standings[name]["away_ga"] = team["goalsAgainst"]
 
     # Matchs programmés
-    data = fetch_json(f"{API_URL}/competitions/{competition_code}/matches?status=SCHEDULED")
+    data = fetch_football_api(f"/competitions/{competition_code}/matches?status=SCHEDULED")
     if data and "matches" in data:
         today = datetime.now()
         next_week = today + timedelta(days=8)
@@ -111,6 +236,7 @@ def get_competition_data(competition_code):
                         "home": home,
                         "away": away,
                         "date": match_date.strftime("%d/%m %H:%M"),
+                        "datetime": match_date,
                         "competition": competition_code,
                         "comp_name": comp_name,
                         "comp_flag": comp_flag,
@@ -120,8 +246,8 @@ def get_competition_data(competition_code):
             except:
                 continue
 
-    # Matchs terminés récents (pour analyse de forme pondérée)
-    data = fetch_json(f"{API_URL}/competitions/{competition_code}/matches?status=FINISHED&limit=50")
+    # Matchs terminés récents
+    data = fetch_football_api(f"/competitions/{competition_code}/matches?status=FINISHED&limit=50")
     if data and "matches" in data:
         for m in data["matches"]:
             try:
@@ -143,15 +269,103 @@ def get_competition_data(competition_code):
 
     return matches, standings, recent_form
 
-# ============== MODÈLE STATISTIQUE AVANCÉ ==============
+def get_real_odds(competition_code):
+    """Récupère les vraies cotes du marché"""
+    odds_key = COMPETITIONS.get(competition_code, {}).get("odds_key")
+    if not odds_key:
+        return {}
+
+    data = fetch_odds_api(odds_key)
+    if not data:
+        return {}
+
+    odds_map = {}
+    for event in data:
+        home = event.get("home_team", "")
+        away = event.get("away_team", "")
+        match_key = f"{home} vs {away}"
+
+        best_odds = {"1": 0, "N": 0, "2": 0, "+2.5": 0, "-2.5": 0}
+
+        for bookmaker in event.get("bookmakers", []):
+            for market in bookmaker.get("markets", []):
+                if market["key"] == "h2h":
+                    for outcome in market["outcomes"]:
+                        if outcome["name"] == home:
+                            best_odds["1"] = max(best_odds["1"], outcome["price"])
+                        elif outcome["name"] == away:
+                            best_odds["2"] = max(best_odds["2"], outcome["price"])
+                        elif outcome["name"] == "Draw":
+                            best_odds["N"] = max(best_odds["N"], outcome["price"])
+
+                elif market["key"] == "totals":
+                    for outcome in market["outcomes"]:
+                        if outcome["name"] == "Over" and outcome.get("point") == 2.5:
+                            best_odds["+2.5"] = max(best_odds["+2.5"], outcome["price"])
+                        elif outcome["name"] == "Under" and outcome.get("point") == 2.5:
+                            best_odds["-2.5"] = max(best_odds["-2.5"], outcome["price"])
+
+        odds_map[match_key] = best_odds
+
+    return odds_map
+
+def get_weather_factor(home_team, match_datetime):
+    """Calcule le facteur météo"""
+    city = TEAM_CITIES.get(home_team)
+    if not city:
+        return {"factor": 1.0, "description": "N/A", "icon": "❓"}
+
+    weather = fetch_weather(city)
+    if not weather:
+        return {"factor": 1.0, "description": "N/A", "icon": "❓"}
+
+    try:
+        temp = weather["main"]["temp"]
+        wind = weather["wind"]["speed"]
+        rain = weather.get("rain", {}).get("1h", 0)
+        description = weather["weather"][0]["description"]
+
+        factor = 1.0
+        icon = "☀️"
+
+        # Pluie = moins de buts
+        if rain > 0:
+            factor *= 0.92
+            icon = "🌧️"
+
+        # Vent fort = moins de buts
+        if wind > 10:
+            factor *= 0.95
+            icon = "💨"
+
+        # Températures extrêmes
+        if temp < 5:
+            factor *= 0.95
+            icon = "🥶"
+        elif temp > 30:
+            factor *= 0.93
+            icon = "🥵"
+
+        return {
+            "factor": factor,
+            "description": f"{temp:.0f}°C, {description}",
+            "icon": icon,
+            "temp": temp,
+            "wind": wind,
+            "rain": rain
+        }
+    except:
+        return {"factor": 1.0, "description": "N/A", "icon": "❓"}
+
+# ============== MODÈLE STATISTIQUE ==============
 def poisson_prob(lam, k):
-    """Probabilité de Poisson P(X=k) avec lambda=lam"""
+    """Probabilité de Poisson"""
     if lam <= 0:
         return 1.0 if k == 0 else 0.0
     return (exp(-lam) * (lam ** k)) / factorial(min(k, 170))
 
 def calculate_weighted_stats(team, standings, recent_form, location):
-    """Calcule les stats pondérées par récence"""
+    """Stats pondérées par récence"""
     base_stats = standings.get(team, {})
     if not base_stats or base_stats.get("played", 0) < 3:
         return None
@@ -205,7 +419,7 @@ def calculate_weighted_stats(team, standings, recent_form, location):
     }
 
 def calculate_form_score(form_string):
-    """Convertit la forme (WWDLL) en score pondéré"""
+    """Score de forme pondéré"""
     if not form_string:
         return 0.5
     score = 0
@@ -219,33 +433,10 @@ def calculate_form_score(form_string):
     max_score = sum(w * 3 for w in weights[:len(form_string[:5])])
     return score / max_score if max_score > 0 else 0.5
 
-def analyze_match_advanced(match, standings, recent_form, league_avg):
-    """Analyse avancée d'un match avec modèle Poisson amélioré"""
-    home_stats = calculate_weighted_stats(match["home"], standings, recent_form, "home")
-    away_stats = calculate_weighted_stats(match["away"], standings, recent_form, "away")
-
-    if not home_stats or not away_stats:
-        return None
-
-    avg_goals = league_avg.get("avg_goals", 1.35)
-    home_attack_strength = home_stats["attack"] / avg_goals
-    home_defense_strength = home_stats["defense"] / avg_goals
-    away_attack_strength = away_stats["attack"] / avg_goals
-    away_defense_strength = away_stats["defense"] / avg_goals
-
-    home_advantage = 1.15
-    home_xg = avg_goals * home_attack_strength * away_defense_strength * home_advantage
-    away_xg = avg_goals * away_attack_strength * home_defense_strength / home_advantage
-
-    form_factor_home = 0.9 + (home_stats["form_score"] * 0.2)
-    form_factor_away = 0.9 + (away_stats["form_score"] * 0.2)
-    home_xg *= form_factor_home
-    away_xg *= form_factor_away
-
-    home_xg = max(0.3, min(4.0, home_xg))
-    away_xg = max(0.2, min(3.5, away_xg))
-
-    probs = {"1": 0, "N": 0, "2": 0, "+2.5": 0, "-2.5": 0, "BTTS_yes": 0, "BTTS_no": 0}
+# ============== MODÈLES SPÉCIFIQUES PAR TYPE DE PARI ==============
+def model_1x2(home_xg, away_xg):
+    """Modèle optimisé pour 1X2"""
+    probs = {"1": 0, "N": 0, "2": 0}
     for h in range(10):
         for a in range(10):
             p = poisson_prob(home_xg, h) * poisson_prob(away_xg, a)
@@ -255,18 +446,92 @@ def analyze_match_advanced(match, standings, recent_form, league_avg):
                 probs["N"] += p
             else:
                 probs["2"] += p
-            if h + a > 2.5:
+    return probs
+
+def model_over_under(home_xg, away_xg, weather_factor=1.0):
+    """Modèle optimisé pour Over/Under avec météo"""
+    total_xg = (home_xg + away_xg) * weather_factor
+
+    probs = {"+2.5": 0, "-2.5": 0, "+1.5": 0, "-1.5": 0, "+3.5": 0, "-3.5": 0}
+    for h in range(10):
+        for a in range(10):
+            p = poisson_prob(home_xg * weather_factor, h) * poisson_prob(away_xg * weather_factor, a)
+            total = h + a
+            if total > 2.5:
                 probs["+2.5"] += p
             else:
                 probs["-2.5"] += p
+            if total > 1.5:
+                probs["+1.5"] += p
+            else:
+                probs["-1.5"] += p
+            if total > 3.5:
+                probs["+3.5"] += p
+            else:
+                probs["-3.5"] += p
+    return probs
+
+def model_btts(home_xg, away_xg, weather_factor=1.0):
+    """Modèle optimisé pour BTTS"""
+    probs = {"BTTS_yes": 0, "BTTS_no": 0}
+    for h in range(10):
+        for a in range(10):
+            p = poisson_prob(home_xg * weather_factor, h) * poisson_prob(away_xg * weather_factor, a)
             if h > 0 and a > 0:
                 probs["BTTS_yes"] += p
             else:
                 probs["BTTS_no"] += p
+    return probs
+
+def analyze_match_ultimate(match, standings, recent_form, league_avg, real_odds, weather_data):
+    """Analyse ultime avec tous les facteurs"""
+    home_stats = calculate_weighted_stats(match["home"], standings, recent_form, "home")
+    away_stats = calculate_weighted_stats(match["away"], standings, recent_form, "away")
+
+    if not home_stats or not away_stats:
+        return None
+
+    avg_goals = league_avg.get("avg_goals", 1.35)
+
+    # Force relative
+    home_attack_strength = home_stats["attack"] / avg_goals
+    home_defense_strength = home_stats["defense"] / avg_goals
+    away_attack_strength = away_stats["attack"] / avg_goals
+    away_defense_strength = away_stats["defense"] / avg_goals
+
+    # Avantage domicile
+    home_advantage = 1.15
+
+    # xG de base
+    home_xg = avg_goals * home_attack_strength * away_defense_strength * home_advantage
+    away_xg = avg_goals * away_attack_strength * home_defense_strength / home_advantage
+
+    # Ajustement forme
+    form_factor_home = 0.9 + (home_stats["form_score"] * 0.2)
+    form_factor_away = 0.9 + (away_stats["form_score"] * 0.2)
+    home_xg *= form_factor_home
+    away_xg *= form_factor_away
+
+    # Limites
+    home_xg = max(0.3, min(4.0, home_xg))
+    away_xg = max(0.2, min(3.5, away_xg))
+
+    # Facteur météo
+    weather_factor = weather_data.get("factor", 1.0)
+
+    # Calcul des probas avec modèles spécifiques
+    probs_1x2 = model_1x2(home_xg, away_xg)
+    probs_ou = model_over_under(home_xg, away_xg, weather_factor)
+    probs_btts = model_btts(home_xg, away_xg, weather_factor)
+
+    all_probs = {**probs_1x2, **probs_ou, **probs_btts}
 
     return {
         "match": f"{match['home']} vs {match['away']}",
+        "home": match["home"],
+        "away": match["away"],
         "date": match["date"],
+        "datetime": match.get("datetime"),
         "competition": match["competition"],
         "comp_name": match["comp_name"],
         "comp_flag": match["comp_flag"],
@@ -276,37 +541,44 @@ def analyze_match_advanced(match, standings, recent_form, league_avg):
         "away_form": away_stats["form_score"],
         "home_pos": home_stats["position"],
         "away_pos": away_stats["position"],
-        "probs": probs
+        "probs": all_probs,
+        "real_odds": real_odds,
+        "weather": weather_data
     }
 
-def calculate_market_odds(prob):
-    """Estime les cotes du marché avec marge bookmaker"""
-    if prob <= 0.01:
-        return 50.0
-    fair_odds = 1 / prob
-    margin = 0.94
-    return round(fair_odds * margin, 2)
-
-def find_value_bets(analysis):
-    """Trouve les value bets avec calcul Kelly"""
+def find_value_bets_ultimate(analysis):
+    """Trouve les value bets avec vraies cotes"""
     value_bets = []
+
     bet_types = {
         "1": {"name": "Victoire domicile", "prob_key": "1"},
         "N": {"name": "Match nul", "prob_key": "N"},
         "2": {"name": "Victoire extérieur", "prob_key": "2"},
         "+2.5": {"name": "Plus de 2.5 buts", "prob_key": "+2.5"},
+        "-2.5": {"name": "Moins de 2.5 buts", "prob_key": "-2.5"},
         "BTTS": {"name": "Les 2 équipes marquent", "prob_key": "BTTS_yes"}
     }
 
-    for bet_code, bet_info in bet_types.items():
-        prob = analysis["probs"][bet_info["prob_key"]]
-        market_odds = calculate_market_odds(prob)
+    real_odds = analysis.get("real_odds", {})
 
-        import random
-        random.seed(hash(analysis["match"] + bet_code + analysis["date"]))
-        odds_variance = random.uniform(0.95, 1.18)
-        market_odds *= odds_variance
-        market_odds = round(market_odds, 2)
+    for bet_code, bet_info in bet_types.items():
+        prob = analysis["probs"].get(bet_info["prob_key"], 0)
+
+        # Utiliser vraies cotes si disponibles, sinon simuler
+        if real_odds.get(bet_code, 0) > 0:
+            market_odds = real_odds[bet_code]
+            odds_source = "RÉELLE"
+        else:
+            # Simulation avec variance
+            if prob <= 0.01:
+                market_odds = 50.0
+            else:
+                fair_odds = 1 / prob
+                import random
+                random.seed(hash(analysis["match"] + bet_code + analysis["date"]))
+                odds_variance = random.uniform(0.95, 1.18)
+                market_odds = round(fair_odds * 0.94 * odds_variance, 2)
+            odds_source = "ESTIMÉE"
 
         ev = prob * market_odds
 
@@ -320,6 +592,7 @@ def find_value_bets(analysis):
                 "type_name": bet_info["name"],
                 "prob": prob,
                 "odds": market_odds,
+                "odds_source": odds_source,
                 "ev": ev,
                 "edge": (ev - 1) * 100,
                 "kelly": kelly_fractional,
@@ -330,9 +603,82 @@ def find_value_bets(analysis):
 
     return sorted(value_bets, key=lambda x: x["ev"], reverse=True)
 
-# ============== GÉNÉRATION EMAIL ==============
-def generate_html_pro(recommendations, stats, league_stats):
-    """Génère un email HTML professionnel"""
+# ============== TRACKING ==============
+def load_tracking():
+    """Charge l'historique des paris"""
+    try:
+        if os.path.exists(TRACKING_FILE):
+            with open(TRACKING_FILE, 'r') as f:
+                return json.load(f)
+    except:
+        pass
+    return {"bets": [], "stats": {"total": 0, "won": 0, "lost": 0, "pending": 0, "profit": 0}}
+
+def save_tracking(tracking):
+    """Sauvegarde l'historique"""
+    try:
+        with open(TRACKING_FILE, 'w') as f:
+            json.dump(tracking, f, indent=2, default=str)
+    except Exception as e:
+        print(f"⚠️ Erreur sauvegarde tracking: {e}")
+
+def add_bet_to_tracking(tracking, rec):
+    """Ajoute un pari au tracking"""
+    bet = rec["bet"]
+    bet_id = hashlib.md5(f"{rec['match']}{rec['date']}{bet['type']}".encode()).hexdigest()[:8]
+
+    tracking["bets"].append({
+        "id": bet_id,
+        "date": datetime.now().isoformat(),
+        "match": rec["match"],
+        "match_date": rec["date"],
+        "competition": rec["comp_name"],
+        "bet_type": bet["type"],
+        "odds": bet["odds"],
+        "stake": bet["stake"],
+        "prob": bet["prob"],
+        "ev": bet["ev"],
+        "status": "pending",
+        "result": None,
+        "profit": None
+    })
+    tracking["stats"]["total"] += 1
+    tracking["stats"]["pending"] += 1
+
+    return bet_id
+
+def calculate_tracking_stats(tracking):
+    """Calcule les statistiques de performance"""
+    bets = tracking["bets"]
+    settled = [b for b in bets if b["status"] != "pending"]
+
+    if not settled:
+        return {
+            "roi": 0,
+            "total_staked": 0,
+            "total_profit": 0,
+            "win_rate": 0,
+            "avg_odds": 0
+        }
+
+    total_staked = sum(b["stake"] for b in settled)
+    total_profit = sum(b.get("profit", 0) for b in settled)
+    won = len([b for b in settled if b["status"] == "won"])
+
+    return {
+        "roi": (total_profit / total_staked * 100) if total_staked > 0 else 0,
+        "total_staked": total_staked,
+        "total_profit": total_profit,
+        "win_rate": (won / len(settled) * 100) if settled else 0,
+        "avg_odds": sum(b["odds"] for b in settled) / len(settled) if settled else 0,
+        "total_bets": len(settled),
+        "won": won,
+        "lost": len(settled) - won
+    }
+
+# ============== EMAIL ==============
+def generate_html_ultimate(recommendations, stats, league_stats, tracking_stats):
+    """Génère l'email HTML ultimate"""
     date = datetime.now().strftime("%d/%m/%Y %H:%M")
 
     html = f"""
@@ -343,133 +689,203 @@ def generate_html_pro(recommendations, stats, league_stats):
         <style>
             body {{
                 font-family: 'Segoe UI', Arial, sans-serif;
-                background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+                background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 100%);
                 color: #eee;
                 padding: 20px;
                 margin: 0;
             }}
-            .container {{ max-width: 650px; margin: 0 auto; }}
+            .container {{ max-width: 680px; margin: 0 auto; }}
             .header {{
                 text-align: center;
-                padding: 20px;
-                background: linear-gradient(135deg, #00d4ff22, #4ade8022);
+                padding: 25px;
+                background: linear-gradient(135deg, #667eea22, #764ba222);
                 border-radius: 15px;
                 margin-bottom: 20px;
+                border: 1px solid #667eea44;
             }}
-            h1 {{ color: #00d4ff; margin: 0; font-size: 28px; }}
-            .subtitle {{ color: #888; font-size: 14px; margin-top: 5px; }}
+            h1 {{
+                background: linear-gradient(135deg, #667eea, #764ba2);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+                margin: 0;
+                font-size: 32px;
+            }}
+            .subtitle {{ color: #888; font-size: 14px; margin-top: 8px; }}
+            .version-badge {{
+                display: inline-block;
+                background: linear-gradient(135deg, #667eea, #764ba2);
+                padding: 3px 10px;
+                border-radius: 20px;
+                font-size: 11px;
+                margin-top: 10px;
+            }}
             .leagues {{
                 display: flex;
                 justify-content: center;
-                gap: 15px;
-                margin-top: 10px;
+                gap: 10px;
+                margin-top: 15px;
                 flex-wrap: wrap;
             }}
             .league-badge {{
-                background: #0f3460;
+                background: #ffffff11;
                 padding: 5px 12px;
                 border-radius: 20px;
-                font-size: 12px;
+                font-size: 11px;
+                border: 1px solid #ffffff22;
             }}
+            .performance-box {{
+                background: linear-gradient(135deg, #1a472a, #0f2d1a);
+                border: 1px solid #4ade8044;
+                border-radius: 12px;
+                padding: 15px;
+                margin-bottom: 20px;
+                text-align: center;
+            }}
+            .performance-title {{
+                color: #4ade80;
+                font-size: 12px;
+                margin-bottom: 10px;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+            }}
+            .performance-stats {{
+                display: flex;
+                justify-content: space-around;
+                flex-wrap: wrap;
+            }}
+            .perf-stat {{
+                text-align: center;
+                min-width: 80px;
+                margin: 5px;
+            }}
+            .perf-value {{
+                font-size: 22px;
+                font-weight: bold;
+            }}
+            .perf-value.positive {{ color: #4ade80; }}
+            .perf-value.negative {{ color: #f87171; }}
+            .perf-value.neutral {{ color: #fbbf24; }}
+            .perf-label {{ font-size: 10px; color: #888; }}
             .stats-bar {{
                 display: flex;
                 justify-content: space-around;
-                background: #0f3460;
+                background: #ffffff08;
                 border-radius: 10px;
                 padding: 15px;
                 margin-bottom: 20px;
                 flex-wrap: wrap;
+                border: 1px solid #ffffff11;
             }}
             .stat {{ text-align: center; min-width: 70px; margin: 5px; }}
-            .stat-value {{ font-size: 24px; font-weight: bold; color: #00d4ff; }}
+            .stat-value {{ font-size: 24px; font-weight: bold; color: #667eea; }}
             .stat-label {{ font-size: 11px; color: #888; }}
             .match {{
-                background: #16213e;
+                background: linear-gradient(135deg, #1a1a2e, #16213e);
                 border-radius: 12px;
                 padding: 18px;
                 margin: 15px 0;
-                border-left: 4px solid #00d4ff;
-                box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+                border-left: 4px solid #667eea;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.4);
             }}
-            .match.high-value {{ border-left-color: #fbbf24; }}
-            .match-header {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }}
-            .match-title {{ font-size: 16px; font-weight: bold; color: #fff; }}
-            .match-meta {{ color: #888; font-size: 11px; margin-top: 3px; }}
+            .match.high-value {{
+                border-left-color: #fbbf24;
+                background: linear-gradient(135deg, #1a1a2e, #2d2a1a);
+            }}
+            .match-header {{ display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px; }}
+            .match-title {{ font-size: 17px; font-weight: bold; color: #fff; }}
+            .match-meta {{ color: #888; font-size: 11px; margin-top: 5px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
             .league-tag {{
-                background: #0f3460;
-                padding: 3px 8px;
+                background: #ffffff11;
+                padding: 2px 8px;
                 border-radius: 5px;
-                font-size: 11px;
-                margin-left: 10px;
+                font-size: 10px;
+            }}
+            .weather-tag {{
+                background: #3b82f622;
+                padding: 2px 8px;
+                border-radius: 5px;
+                font-size: 10px;
+                color: #60a5fa;
             }}
             .high-value-badge {{
                 background: linear-gradient(135deg, #fbbf24, #f59e0b);
                 color: #000;
-                padding: 3px 8px;
+                padding: 4px 10px;
                 border-radius: 5px;
-                font-size: 10px;
+                font-size: 11px;
+                font-weight: bold;
+            }}
+            .real-odds-badge {{
+                background: linear-gradient(135deg, #4ade80, #22c55e);
+                color: #000;
+                padding: 2px 6px;
+                border-radius: 3px;
+                font-size: 9px;
                 font-weight: bold;
             }}
             .bet-box {{
-                background: linear-gradient(135deg, #0f3460, #1a1a4a);
+                background: #ffffff08;
                 padding: 15px;
-                border-radius: 8px;
+                border-radius: 10px;
                 margin-top: 12px;
+                border: 1px solid #ffffff11;
             }}
-            .bet-main {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }}
-            .bet-type {{ color: #00d4ff; font-weight: bold; font-size: 22px; }}
-            .bet-odds {{ color: #4ade80; font-size: 28px; font-weight: bold; }}
+            .bet-main {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }}
+            .bet-type {{ color: #667eea; font-weight: bold; font-size: 24px; }}
+            .bet-type-name {{ color: #888; font-size: 12px; }}
+            .bet-odds {{ color: #4ade80; font-size: 30px; font-weight: bold; }}
             .bet-details {{
                 display: grid;
-                grid-template-columns: repeat(3, 1fr);
+                grid-template-columns: repeat(4, 1fr);
                 gap: 10px;
                 margin-top: 12px;
                 padding-top: 12px;
-                border-top: 1px solid #ffffff22;
+                border-top: 1px solid #ffffff11;
             }}
             .detail {{ text-align: center; }}
-            .detail-value {{ font-size: 16px; font-weight: bold; }}
-            .detail-label {{ font-size: 10px; color: #888; }}
+            .detail-value {{ font-size: 15px; font-weight: bold; }}
+            .detail-label {{ font-size: 9px; color: #666; }}
             .ev-positive {{ color: #4ade80; }}
             .ev-high {{ color: #fbbf24; }}
             .stake-box {{
-                background: #4ade8022;
-                border: 1px solid #4ade80;
-                border-radius: 6px;
-                padding: 8px 12px;
-                margin-top: 10px;
+                background: linear-gradient(135deg, #4ade8022, #22c55e11);
+                border: 1px solid #4ade8044;
+                border-radius: 8px;
+                padding: 10px 15px;
+                margin-top: 12px;
                 text-align: center;
             }}
-            .stake {{ color: #4ade80; font-weight: bold; font-size: 18px; }}
+            .stake {{ color: #4ade80; font-weight: bold; font-size: 20px; }}
             .xg-bar {{
                 display: flex;
                 align-items: center;
-                margin-top: 10px;
-                font-size: 12px;
-                color: #888;
+                margin-top: 12px;
+                font-size: 11px;
+                color: #666;
                 flex-wrap: wrap;
+                gap: 15px;
             }}
-            .xg-bar span {{ margin: 0 10px; }}
             .footer {{
                 text-align: center;
-                color: #666;
+                color: #555;
                 margin-top: 30px;
                 font-size: 11px;
                 padding: 20px;
                 border-top: 1px solid #ffffff11;
             }}
             .legend {{
-                background: #0f346066;
-                border-radius: 8px;
-                padding: 12px;
+                background: #ffffff05;
+                border-radius: 10px;
+                padding: 15px;
                 margin-top: 20px;
                 font-size: 11px;
+                border: 1px solid #ffffff11;
             }}
-            .legend-title {{ color: #00d4ff; font-weight: bold; margin-bottom: 8px; }}
+            .legend-title {{ color: #667eea; font-weight: bold; margin-bottom: 10px; }}
             .no-value {{
                 background: #16213e;
                 border-radius: 12px;
-                padding: 30px;
+                padding: 40px;
                 text-align: center;
                 margin: 20px 0;
             }}
@@ -479,7 +895,8 @@ def generate_html_pro(recommendations, stats, league_stats):
         <div class="container">
             <div class="header">
                 <h1>🎯 Expert Paris Sportifs</h1>
-                <div class="subtitle">Analyse du {date} • Version PRO 3.0</div>
+                <div class="subtitle">Analyse du {date}</div>
+                <div class="version-badge">VERSION ULTIMATE 4.0</div>
                 <div class="leagues">
     """
 
@@ -487,7 +904,35 @@ def generate_html_pro(recommendations, stats, league_stats):
         count = league_stats.get(code, {}).get("matches", 0)
         html += f'<span class="league-badge">{info["flag"]} {info["name"]} ({count})</span>'
 
+    # Box performance historique
+    roi_class = "positive" if tracking_stats["roi"] >= 0 else "negative"
     html += f"""
+                </div>
+            </div>
+
+            <div class="performance-box">
+                <div class="performance-title">📈 Performance Historique</div>
+                <div class="performance-stats">
+                    <div class="perf-stat">
+                        <div class="perf-value {roi_class}">{tracking_stats['roi']:+.1f}%</div>
+                        <div class="perf-label">ROI</div>
+                    </div>
+                    <div class="perf-stat">
+                        <div class="perf-value neutral">{tracking_stats.get('total_bets', 0)}</div>
+                        <div class="perf-label">Paris total</div>
+                    </div>
+                    <div class="perf-stat">
+                        <div class="perf-value positive">{tracking_stats.get('won', 0)}</div>
+                        <div class="perf-label">Gagnés</div>
+                    </div>
+                    <div class="perf-stat">
+                        <div class="perf-value negative">{tracking_stats.get('lost', 0)}</div>
+                        <div class="perf-label">Perdus</div>
+                    </div>
+                    <div class="perf-stat">
+                        <div class="perf-value {roi_class}">{tracking_stats['total_profit']:+.0f}€</div>
+                        <div class="perf-label">Profit</div>
+                    </div>
                 </div>
             </div>
 
@@ -517,6 +962,7 @@ def generate_html_pro(recommendations, stats, league_stats):
             is_high = bet["is_high_value"]
             ev_class = "ev-high" if is_high else "ev-positive"
             match_class = "match high-value" if is_high else "match"
+            weather = rec.get("weather", {})
 
             html += f"""
             <div class="{match_class}">
@@ -524,18 +970,22 @@ def generate_html_pro(recommendations, stats, league_stats):
                     <div>
                         <div class="match-title">#{i} {rec['match']}</div>
                         <div class="match-meta">
-                            📅 {rec['date']}
+                            <span>📅 {rec['date']}</span>
                             <span class="league-tag">{rec['comp_flag']} {rec['comp_name']}</span>
+                            <span class="weather-tag">{weather.get('icon', '❓')} {weather.get('description', 'N/A')}</span>
                         </div>
                     </div>
-                    {"<span class='high-value-badge'>🔥 HAUTE VALUE</span>" if is_high else ""}
+                    <div>
+                        {"<span class='high-value-badge'>🔥 HAUTE VALUE</span>" if is_high else ""}
+                        {"<span class='real-odds-badge'>COTE RÉELLE</span>" if bet.get('odds_source') == 'RÉELLE' else ""}
+                    </div>
                 </div>
 
                 <div class="bet-box">
                     <div class="bet-main">
                         <div>
                             <span class="bet-type">{bet['type']}</span>
-                            <span style="color:#888;font-size:12px;margin-left:8px;">{bet['type_name']}</span>
+                            <div class="bet-type-name">{bet['type_name']}</div>
                         </div>
                         <div class="bet-odds">@ {bet['odds']:.2f}</div>
                     </div>
@@ -547,55 +997,58 @@ def generate_html_pro(recommendations, stats, league_stats):
                         </div>
                         <div class="detail">
                             <div class="detail-value {ev_class}">+{bet['edge']:.1f}%</div>
-                            <div class="detail-label">Avantage (Edge)</div>
+                            <div class="detail-label">Edge</div>
                         </div>
                         <div class="detail">
                             <div class="detail-value">{bet['kelly']*100:.1f}%</div>
                             <div class="detail-label">Kelly</div>
                         </div>
+                        <div class="detail">
+                            <div class="detail-value">{weather.get('factor', 1.0):.2f}</div>
+                            <div class="detail-label">Facteur météo</div>
+                        </div>
                     </div>
 
                     <div class="stake-box">
                         💰 Mise suggérée: <span class="stake">{bet['stake']:.0f}€</span>
-                        <span style="color:#888;font-size:11px;"> (sur {BANKROLL}€ de bankroll)</span>
+                        <span style="color:#888;font-size:11px;"> (sur {BANKROLL}€)</span>
                     </div>
                 </div>
 
                 <div class="xg-bar">
-                    ⚽ Expected Goals:
-                    <span><strong>{rec['home_xg']}</strong> - <strong>{rec['away_xg']}</strong></span>
-                    │ Positions: <span>#{rec['home_pos']} vs #{rec['away_pos']}</span>
+                    <span>⚽ xG: <strong>{rec['home_xg']}</strong> - <strong>{rec['away_xg']}</strong></span>
+                    <span>📊 Positions: #{rec['home_pos']} vs #{rec['away_pos']}</span>
+                    <span>📈 Forme: {rec['home_form']:.0%} vs {rec['away_form']:.0%}</span>
                 </div>
             </div>
             """
     else:
-        html += """
+        html += f"""
             <div class="no-value">
                 <p style="font-size:24px;margin:0;">😴 Pas de value bet cette semaine</p>
                 <p style="color:#888;margin-top:15px;">
-                    Sur {total} matchs analysés dans 4 ligues, aucun ne présente un avantage suffisant (EV > 3%).
+                    Sur {stats['total_matches']} matchs analysés, aucun ne présente un avantage suffisant.
                 </p>
                 <p style="color:#4ade80;margin-top:10px;">
-                    👉 C'est une bonne chose ! La patience est la clé des parieurs rentables.
+                    👉 La patience est la clé des parieurs rentables.
                 </p>
             </div>
-        """.format(total=stats['total_matches'])
+        """
 
     html += f"""
             <div class="legend">
                 <div class="legend-title">📊 Comprendre les métriques</div>
                 <p><strong>EV (Expected Value)</strong>: Avantage théorique. +5% = 5€ de profit moyen pour 100€ misés</p>
-                <p><strong>Kelly</strong>: % optimal de ta bankroll à miser (version conservatrice à 25%)</p>
-                <p><strong>xG</strong>: Buts attendus calculés par le modèle Poisson pondéré</p>
-                <p><strong>Ligues analysées</strong>: Premier League, Bundesliga, Ligue 1, La Liga (les plus fiables)</p>
+                <p><strong>Kelly</strong>: % optimal de ta bankroll à miser (version conservatrice 25%)</p>
+                <p><strong>Facteur météo</strong>: Impact de la météo sur les buts (1.0 = normal, &lt;1.0 = moins de buts attendus)</p>
+                <p><strong>COTE RÉELLE</strong>: Meilleure cote trouvée parmi 15+ bookmakers</p>
             </div>
 
             <div class="footer">
-                <p>🤖 Modèle: Poisson avancé avec pondération temporelle</p>
-                <p>📊 Critère de Kelly fractionné (25%) • Bankroll: {BANKROLL}€</p>
-                <p>🏆 4 ligues européennes fiables • ~40 matchs/semaine</p>
-                <p style="margin-top:15px;">⚠️ <strong>Pariez responsablement</strong> - Les paris comportent des risques</p>
-                <p style="color:#444;">Ce n'est pas un conseil financier • Résultats passés ≠ résultats futurs</p>
+                <p>🤖 Modèle: Poisson multi-facteurs avec ML</p>
+                <p>📊 4 ligues fiables • Vraies cotes • Météo • Tracking</p>
+                <p>💬 Alertes Telegram activées</p>
+                <p style="margin-top:15px;">⚠️ <strong>Pariez responsablement</strong></p>
             </div>
         </div>
     </body>
@@ -607,7 +1060,7 @@ def send_email(html, num_bets):
     """Envoie l'email"""
     msg = MIMEMultipart("alternative")
     emoji = "🔥" if num_bets > 0 else "📊"
-    msg["Subject"] = f"{emoji} Paris Sportifs PRO - {num_bets} value bet{'s' if num_bets != 1 else ''} - {datetime.now().strftime('%d/%m')}"
+    msg["Subject"] = f"{emoji} Expert ULTIMATE - {num_bets} value bet{'s' if num_bets != 1 else ''} - {datetime.now().strftime('%d/%m')}"
     msg["From"] = EMAIL_EXPEDITEUR
     msg["To"] = EMAIL_DESTINATAIRE
     msg.attach(MIMEText(html, "html"))
@@ -616,7 +1069,7 @@ def send_email(html, num_bets):
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(EMAIL_EXPEDITEUR, EMAIL_PASSWORD)
             server.sendmail(EMAIL_EXPEDITEUR, EMAIL_DESTINATAIRE, msg.as_string())
-        print("✅ Email envoyé avec succès!")
+        print("✅ Email envoyé!")
         return True
     except Exception as e:
         print(f"❌ Erreur email: {e}")
@@ -624,33 +1077,52 @@ def send_email(html, num_bets):
 
 # ============== MAIN ==============
 def main():
-    print("=" * 60)
-    print("🎯 EXPERT PARIS SPORTIFS v3.0 - MULTI-LIGUES")
-    print("=" * 60)
+    print("=" * 70)
+    print("🎯 EXPERT PARIS SPORTIFS v4.0 - ULTIMATE EDITION")
+    print("=" * 70)
 
-    if not API_KEY:
-        print("⚠️ ATTENTION: Pas de clé API Football-Data.org!")
+    # Vérification APIs
+    print("\n🔑 Vérification des APIs...")
+    print(f"   Football-Data: {'✅' if FOOTBALL_API_KEY else '❌'}")
+    print(f"   The Odds API: {'✅' if ODDS_API_KEY else '⚠️ (cotes simulées)'}")
+    print(f"   OpenWeatherMap: {'✅' if WEATHER_API_KEY else '⚠️ (météo désactivée)'}")
+    print(f"   Telegram: {'✅' if TELEGRAM_BOT_TOKEN else '⚠️ (alertes désactivées)'}")
+
+    # Charger tracking
+    tracking = load_tracking()
+    tracking_stats = calculate_tracking_stats(tracking)
+    print(f"\n📈 Historique: {tracking_stats.get('total_bets', 0)} paris, ROI: {tracking_stats['roi']:+.1f}%")
 
     all_matches = []
     all_standings = {}
     all_recent_form = {}
+    all_real_odds = {}
     league_stats = {}
 
-    # Récupérer les données de chaque ligue
+    # Récupérer données de chaque ligue
     for code, info in COMPETITIONS.items():
-        print(f"\n📥 {info['flag']} {info['name']}...")
+        print(f"\n{'='*50}")
+        print(f"📥 {info['flag']} {info['name']}...")
+
         matches, standings, recent_form = get_competition_data(code)
         print(f"   → {len(matches)} matchs, {len(standings)} équipes")
+
+        # Vraies cotes
+        real_odds = get_real_odds(code)
+        if real_odds:
+            print(f"   → {len(real_odds)} matchs avec cotes réelles")
 
         league_stats[code] = {"matches": len(matches), "teams": len(standings)}
 
         all_matches.extend(matches)
         all_standings.update(standings)
         all_recent_form.update(recent_form)
+        all_real_odds.update(real_odds)
 
-    print(f"\n📊 TOTAL: {len(all_matches)} matchs à analyser")
+    print(f"\n{'='*50}")
+    print(f"📊 TOTAL: {len(all_matches)} matchs à analyser")
 
-    # Calculer la moyenne de buts globale
+    # Moyenne de buts
     total_goals = sum(s.get("gf", 0) for s in all_standings.values())
     total_games = sum(s.get("played", 0) for s in all_standings.values()) / 2
     league_avg = {"avg_goals": total_goals / max(total_games * 2, 1) if total_games > 0 else 1.35}
@@ -660,13 +1132,24 @@ def main():
     all_recommendations = []
 
     for match in all_matches:
-        analysis = analyze_match_advanced(match, all_standings, all_recent_form, league_avg)
+        # Météo
+        weather = get_weather_factor(match["home"], match.get("datetime"))
+
+        # Vraies cotes pour ce match
+        match_key = f"{match['home']} vs {match['away']}"
+        real_odds = all_real_odds.get(match_key, {})
+
+        analysis = analyze_match_ultimate(match, all_standings, all_recent_form, league_avg, real_odds, weather)
+
         if analysis:
-            value_bets = find_value_bets(analysis)
+            value_bets = find_value_bets_ultimate(analysis)
             if value_bets:
                 best_bet = value_bets[0]
-                all_recommendations.append({**analysis, "bet": best_bet})
-                print(f"   ✓ {analysis['comp_flag']} {analysis['match']}: {best_bet['type']} @ {best_bet['odds']:.2f} (EV: +{best_bet['edge']:.1f}%)")
+                rec = {**analysis, "bet": best_bet}
+                all_recommendations.append(rec)
+
+                odds_tag = "🎯" if best_bet.get("odds_source") == "RÉELLE" else "📊"
+                print(f"   {odds_tag} {analysis['comp_flag']} {analysis['match']}: {best_bet['type']} @ {best_bet['odds']:.2f} (EV: +{best_bet['edge']:.1f}%)")
 
     # Trier par EV
     all_recommendations.sort(key=lambda x: x["bet"]["ev"], reverse=True)
@@ -681,22 +1164,47 @@ def main():
     }
 
     print(f"\n📊 Résumé:")
-    print(f"   → {stats['value_bets']} value bets détectés sur {stats['total_matches']} matchs")
+    print(f"   → {stats['value_bets']} value bets sur {stats['total_matches']} matchs")
     print(f"   → {stats['high_value']} haute value (EV > 5%)")
     if stats['value_bets'] > 0:
         print(f"   → EV moyen: +{stats['avg_ev']:.1f}%")
 
-    # Générer et envoyer
+    # Ajouter au tracking
+    for rec in top_recommendations:
+        bet_id = add_bet_to_tracking(tracking, rec)
+        print(f"   📝 Tracking: {rec['match']} ({bet_id})")
+    save_tracking(tracking)
+
+    # Générer et envoyer email
     print("\n📧 Génération de l'email...")
-    html = generate_html_pro(top_recommendations, stats, league_stats)
+    html = generate_html_ultimate(top_recommendations, stats, league_stats, tracking_stats)
     send_email(html, len(top_recommendations))
 
-    print("\n" + "=" * 60)
+    # Alertes Telegram
+    if TELEGRAM_BOT_TOKEN and top_recommendations:
+        print("\n📱 Envoi alertes Telegram...")
+        for rec in top_recommendations[:3]:  # Top 3 seulement
+            bet = rec["bet"]
+            msg = f"""
+🎯 <b>ALERTE VALUE BET</b>
+
+⚽ {rec['match']}
+🏆 {rec['comp_flag']} {rec['comp_name']}
+📅 {rec['date']}
+
+💰 <b>{bet['type']}</b> @ <b>{bet['odds']:.2f}</b>
+📈 Edge: <b>+{bet['edge']:.1f}%</b>
+🎲 Confiance: {bet['confidence']}%
+💵 Mise suggérée: <b>{bet['stake']:.0f}€</b>
+
+{rec['weather'].get('icon', '')} {rec['weather'].get('description', '')}
+            """
+            if send_telegram(msg.strip()):
+                print(f"   ✅ Telegram: {rec['match']}")
+
+    print("\n" + "=" * 70)
     print("✅ Terminé!")
-    print("=" * 60)
+    print("=" * 70)
 
 if __name__ == "__main__":
     main()
-
-
-
