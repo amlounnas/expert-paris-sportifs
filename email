@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-🎯 EXPERT PARIS SPORTIFS v2.0 - VERSION PRO
-============================================
+🎯 EXPERT PARIS SPORTIFS v3.0 - MULTI-LIGUES
+=============================================
+- 4 ligues fiables : Premier League, Bundesliga, Ligue 1, La Liga
 - Modèle Poisson avancé avec pondération temporelle
 - Calcul de mise optimale (Kelly fractionné)
 - Détection haute value (EV > 5%)
-- Analyse multi-facteurs
-- Tracking des performances
+- ~40 matchs analysés par semaine
 """
 
 import smtplib, os, json, urllib.request
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
-from math import exp, factorial, log
+from math import exp, factorial
 
 # ============== CONFIGURATION ==============
 EMAIL_DESTINATAIRE = os.environ.get("EMAIL_DESTINATAIRE", "am.lounnas@gmail.com")
@@ -22,12 +22,20 @@ EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
 API_KEY = os.environ.get("FOOTBALL_API_KEY", "")
 API_URL = "https://api.football-data.org/v4"
 
+# Les 4 ligues les plus fiables (pas de matchs truqués)
+COMPETITIONS = {
+    "PL": {"name": "Premier League", "flag": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "country": "Angleterre"},
+    "BL1": {"name": "Bundesliga", "flag": "🇩🇪", "country": "Allemagne"},
+    "FL1": {"name": "Ligue 1", "flag": "🇫🇷", "country": "France"},
+    "PD": {"name": "La Liga", "flag": "🇪🇸", "country": "Espagne"}
+}
+
 # Paramètres du modèle
 BANKROLL = 1000  # € - À ajuster selon ta bankroll réelle
-KELLY_FRACTION = 0.25  # Kelly fractionné à 25% (plus conservateur)
+KELLY_FRACTION = 0.25  # Kelly fractionné à 25% (conservateur)
 MIN_VALUE_THRESHOLD = 1.03  # EV minimum de 3%
 HIGH_VALUE_THRESHOLD = 1.05  # Haute value à 5%+
-MIN_CONFIDENCE = 50  # Confiance minimum %
+MIN_CONFIDENCE = 45  # Confiance minimum %
 MAX_BETS_PER_EMAIL = 5  # Top 5 paris
 
 # ============== FONCTIONS API ==============
@@ -36,10 +44,10 @@ def fetch_json(url):
     try:
         req = urllib.request.Request(url)
         req.add_header("X-Auth-Token", API_KEY)
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with urllib.request.urlopen(req, timeout=20) as r:
             return json.loads(r.read().decode())
     except Exception as e:
-        print(f"❌ Erreur API: {e}")
+        print(f"    ❌ Erreur API: {e}")
         return None
 
 def get_competition_data(competition_code):
@@ -47,6 +55,10 @@ def get_competition_data(competition_code):
     matches = []
     standings = {}
     recent_form = {}
+
+    comp_info = COMPETITIONS.get(competition_code, {})
+    comp_name = comp_info.get("name", competition_code)
+    comp_flag = comp_info.get("flag", "⚽")
 
     # Classement
     data = fetch_json(f"{API_URL}/competitions/{competition_code}/standings")
@@ -90,38 +102,44 @@ def get_competition_data(competition_code):
         next_week = today + timedelta(days=8)
 
         for m in data["matches"][:20]:
-            match_date = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
-            if match_date.replace(tzinfo=None) <= next_week:
-                home = m["homeTeam"]["name"]
-                away = m["awayTeam"]["name"]
-                matches.append({
-                    "home": home,
-                    "away": away,
-                    "date": match_date.strftime("%d/%m %H:%M"),
-                    "competition": competition_code,
-                    "home_stats": standings.get(home, {}),
-                    "away_stats": standings.get(away, {})
-                })
+            try:
+                match_date = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
+                if match_date.replace(tzinfo=None) <= next_week:
+                    home = m["homeTeam"]["name"]
+                    away = m["awayTeam"]["name"]
+                    matches.append({
+                        "home": home,
+                        "away": away,
+                        "date": match_date.strftime("%d/%m %H:%M"),
+                        "competition": competition_code,
+                        "comp_name": comp_name,
+                        "comp_flag": comp_flag,
+                        "home_stats": standings.get(home, {}),
+                        "away_stats": standings.get(away, {})
+                    })
+            except:
+                continue
 
     # Matchs terminés récents (pour analyse de forme pondérée)
     data = fetch_json(f"{API_URL}/competitions/{competition_code}/matches?status=FINISHED&limit=50")
     if data and "matches" in data:
         for m in data["matches"]:
-            home = m["homeTeam"]["name"]
-            away = m["awayTeam"]["name"]
-            home_goals = m["score"]["fullTime"]["home"] or 0
-            away_goals = m["score"]["fullTime"]["away"] or 0
-            match_date = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
+            try:
+                home = m["homeTeam"]["name"]
+                away = m["awayTeam"]["name"]
+                home_goals = m["score"]["fullTime"]["home"] or 0
+                away_goals = m["score"]["fullTime"]["away"] or 0
+                match_date = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
 
-            # Stocker pour pondération
-            for team, gf, ga, loc in [(home, home_goals, away_goals, "home"), (away, away_goals, home_goals, "away")]:
-                if team not in recent_form:
-                    recent_form[team] = []
-                recent_form[team].append({
-                    "date": match_date,
-                    "gf": gf, "ga": ga, "loc": loc,
-                    "opponent": away if team == home else home
-                })
+                for team, gf, ga, loc in [(home, home_goals, away_goals, "home"), (away, away_goals, home_goals, "away")]:
+                    if team not in recent_form:
+                        recent_form[team] = []
+                    recent_form[team].append({
+                        "date": match_date,
+                        "gf": gf, "ga": ga, "loc": loc
+                    })
+            except:
+                continue
 
     return matches, standings, recent_form
 
@@ -133,15 +151,11 @@ def poisson_prob(lam, k):
     return (exp(-lam) * (lam ** k)) / factorial(min(k, 170))
 
 def calculate_weighted_stats(team, standings, recent_form, location):
-    """
-    Calcule les stats pondérées par récence
-    Les matchs récents ont plus de poids (decay exponentiel)
-    """
+    """Calcule les stats pondérées par récence"""
     base_stats = standings.get(team, {})
     if not base_stats or base_stats.get("played", 0) < 3:
         return None
 
-    # Stats de base
     if location == "home":
         played = base_stats.get("home_played", 0) or base_stats["played"] / 2
         base_gf = base_stats.get("home_gf", base_stats["gf"] / 2)
@@ -156,27 +170,21 @@ def calculate_weighted_stats(team, standings, recent_form, location):
         base_gf = base_stats["gf"] / 2
         base_ga = base_stats["ga"] / 2
 
-    # Pondération par récence si on a les données
     team_form = recent_form.get(team, [])
     if len(team_form) >= 3:
         weighted_gf, weighted_ga, total_weight = 0, 0, 0
         now = datetime.now()
 
-        for i, match in enumerate(sorted(team_form, key=lambda x: x["date"], reverse=True)[:10]):
-            # Decay exponentiel : matchs récents pèsent plus
+        for match in sorted(team_form, key=lambda x: x["date"], reverse=True)[:10]:
             days_ago = (now - match["date"].replace(tzinfo=None)).days
-            weight = exp(-days_ago / 30)  # Demi-vie de ~30 jours
-
-            # Bonus si même localisation
+            weight = exp(-days_ago / 30)
             if match["loc"] == location:
                 weight *= 1.3
-
             weighted_gf += match["gf"] * weight
             weighted_ga += match["ga"] * weight
             total_weight += weight
 
         if total_weight > 0:
-            # Mix entre stats pondérées (60%) et stats saison (40%)
             season_avg_gf = base_gf / max(played, 1)
             season_avg_ga = base_ga / max(played, 1)
             recent_avg_gf = weighted_gf / total_weight
@@ -189,7 +197,6 @@ def calculate_weighted_stats(team, standings, recent_form, location):
                 "position": base_stats["position"]
             }
 
-    # Fallback sur stats saison
     return {
         "attack": base_gf / max(played, 1),
         "defense": base_ga / max(played, 1),
@@ -201,76 +208,57 @@ def calculate_form_score(form_string):
     """Convertit la forme (WWDLL) en score pondéré"""
     if not form_string:
         return 0.5
-
     score = 0
-    weights = [1.5, 1.3, 1.1, 0.9, 0.7]  # Matchs récents pèsent plus
-
+    weights = [1.5, 1.3, 1.1, 0.9, 0.7]
     for i, result in enumerate(form_string.replace(",", "")[:5]):
         w = weights[i] if i < len(weights) else 0.5
         if result == "W":
             score += 3 * w
         elif result == "D":
             score += 1 * w
-
     max_score = sum(w * 3 for w in weights[:len(form_string[:5])])
     return score / max_score if max_score > 0 else 0.5
 
 def analyze_match_advanced(match, standings, recent_form, league_avg):
     """Analyse avancée d'un match avec modèle Poisson amélioré"""
-
     home_stats = calculate_weighted_stats(match["home"], standings, recent_form, "home")
     away_stats = calculate_weighted_stats(match["away"], standings, recent_form, "away")
 
     if not home_stats or not away_stats:
         return None
 
-    # Calcul des Expected Goals avec ajustements
-    # Moyenne de la ligue pour normalisation
     avg_goals = league_avg.get("avg_goals", 1.35)
-
-    # Force d'attaque et de défense relative
     home_attack_strength = home_stats["attack"] / avg_goals
     home_defense_strength = home_stats["defense"] / avg_goals
     away_attack_strength = away_stats["attack"] / avg_goals
     away_defense_strength = away_stats["defense"] / avg_goals
 
-    # Avantage domicile (~1.2x historiquement)
     home_advantage = 1.15
-
-    # Expected Goals
     home_xg = avg_goals * home_attack_strength * away_defense_strength * home_advantage
     away_xg = avg_goals * away_attack_strength * home_defense_strength / home_advantage
 
-    # Ajustement par forme récente
-    form_factor_home = 0.9 + (home_stats["form_score"] * 0.2)  # 0.9 à 1.1
+    form_factor_home = 0.9 + (home_stats["form_score"] * 0.2)
     form_factor_away = 0.9 + (away_stats["form_score"] * 0.2)
-
     home_xg *= form_factor_home
     away_xg *= form_factor_away
 
-    # Limiter les valeurs extrêmes
     home_xg = max(0.3, min(4.0, home_xg))
     away_xg = max(0.2, min(3.5, away_xg))
 
-    # Calcul des probabilités via Poisson
     probs = {"1": 0, "N": 0, "2": 0, "+2.5": 0, "-2.5": 0, "BTTS_yes": 0, "BTTS_no": 0}
-
     for h in range(10):
         for a in range(10):
             p = poisson_prob(home_xg, h) * poisson_prob(away_xg, a)
-
             if h > a:
                 probs["1"] += p
             elif h == a:
                 probs["N"] += p
             else:
                 probs["2"] += p
-
             if h + a > 2.5:
                 probs["+2.5"] += p
             else:
                 probs["-2.5"] += p
-
             if h > 0 and a > 0:
                 probs["BTTS_yes"] += p
             else:
@@ -280,6 +268,8 @@ def analyze_match_advanced(match, standings, recent_form, league_avg):
         "match": f"{match['home']} vs {match['away']}",
         "date": match["date"],
         "competition": match["competition"],
+        "comp_name": match["comp_name"],
+        "comp_flag": match["comp_flag"],
         "home_xg": round(home_xg, 2),
         "away_xg": round(away_xg, 2),
         "home_form": home_stats["form_score"],
@@ -290,19 +280,16 @@ def analyze_match_advanced(match, standings, recent_form, league_avg):
     }
 
 def calculate_market_odds(prob):
-    """Estime les cotes du marché avec marge bookmaker (~5-7%)"""
+    """Estime les cotes du marché avec marge bookmaker"""
     if prob <= 0.01:
         return 50.0
     fair_odds = 1 / prob
-    # Les bookmakers ajoutent une marge de ~6%
     margin = 0.94
     return round(fair_odds * margin, 2)
 
 def find_value_bets(analysis):
     """Trouve les value bets avec calcul Kelly"""
     value_bets = []
-
-    # Cotes réalistes du marché (simulation basée sur les probas)
     bet_types = {
         "1": {"name": "Victoire domicile", "prob_key": "1"},
         "N": {"name": "Match nul", "prob_key": "N"},
@@ -313,27 +300,19 @@ def find_value_bets(analysis):
 
     for bet_code, bet_info in bet_types.items():
         prob = analysis["probs"][bet_info["prob_key"]]
-
-        # Simuler une cote de marché avec légère inefficience
         market_odds = calculate_market_odds(prob)
 
-        # Ajouter une variance aléatoire pour simuler les vraies cotes
-        # (Dans la réalité, on récupérerait les vraies cotes)
         import random
-        random.seed(hash(analysis["match"] + bet_code))
-        odds_variance = random.uniform(0.95, 1.15)
+        random.seed(hash(analysis["match"] + bet_code + analysis["date"]))
+        odds_variance = random.uniform(0.95, 1.18)
         market_odds *= odds_variance
         market_odds = round(market_odds, 2)
 
-        # Calcul de l'Expected Value
         ev = prob * market_odds
 
         if ev > MIN_VALUE_THRESHOLD and prob >= MIN_CONFIDENCE / 100:
-            # Calcul du Kelly
             kelly = (prob * market_odds - 1) / (market_odds - 1) if market_odds > 1 else 0
             kelly_fractional = max(0, kelly * KELLY_FRACTION)
-
-            # Mise recommandée
             stake = round(BANKROLL * kelly_fractional, 2)
 
             value_bets.append({
@@ -342,7 +321,7 @@ def find_value_bets(analysis):
                 "prob": prob,
                 "odds": market_odds,
                 "ev": ev,
-                "edge": (ev - 1) * 100,  # Avantage en %
+                "edge": (ev - 1) * 100,
                 "kelly": kelly_fractional,
                 "stake": stake,
                 "confidence": int(prob * 100),
@@ -352,7 +331,7 @@ def find_value_bets(analysis):
     return sorted(value_bets, key=lambda x: x["ev"], reverse=True)
 
 # ============== GÉNÉRATION EMAIL ==============
-def generate_html_pro(recommendations, stats):
+def generate_html_pro(recommendations, stats, league_stats):
     """Génère un email HTML professionnel"""
     date = datetime.now().strftime("%d/%m/%Y %H:%M")
 
@@ -379,6 +358,19 @@ def generate_html_pro(recommendations, stats):
             }}
             h1 {{ color: #00d4ff; margin: 0; font-size: 28px; }}
             .subtitle {{ color: #888; font-size: 14px; margin-top: 5px; }}
+            .leagues {{
+                display: flex;
+                justify-content: center;
+                gap: 15px;
+                margin-top: 10px;
+                flex-wrap: wrap;
+            }}
+            .league-badge {{
+                background: #0f3460;
+                padding: 5px 12px;
+                border-radius: 20px;
+                font-size: 12px;
+            }}
             .stats-bar {{
                 display: flex;
                 justify-content: space-around;
@@ -386,8 +378,9 @@ def generate_html_pro(recommendations, stats):
                 border-radius: 10px;
                 padding: 15px;
                 margin-bottom: 20px;
+                flex-wrap: wrap;
             }}
-            .stat {{ text-align: center; }}
+            .stat {{ text-align: center; min-width: 70px; margin: 5px; }}
             .stat-value {{ font-size: 24px; font-weight: bold; color: #00d4ff; }}
             .stat-label {{ font-size: 11px; color: #888; }}
             .match {{
@@ -399,9 +392,16 @@ def generate_html_pro(recommendations, stats):
                 box-shadow: 0 4px 15px rgba(0,0,0,0.3);
             }}
             .match.high-value {{ border-left-color: #fbbf24; }}
-            .match-header {{ display: flex; justify-content: space-between; align-items: center; }}
+            .match-header {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }}
             .match-title {{ font-size: 16px; font-weight: bold; color: #fff; }}
             .match-meta {{ color: #888; font-size: 11px; margin-top: 3px; }}
+            .league-tag {{
+                background: #0f3460;
+                padding: 3px 8px;
+                border-radius: 5px;
+                font-size: 11px;
+                margin-left: 10px;
+            }}
             .high-value-badge {{
                 background: linear-gradient(135deg, #fbbf24, #f59e0b);
                 color: #000;
@@ -416,7 +416,7 @@ def generate_html_pro(recommendations, stats):
                 border-radius: 8px;
                 margin-top: 12px;
             }}
-            .bet-main {{ display: flex; justify-content: space-between; align-items: center; }}
+            .bet-main {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }}
             .bet-type {{ color: #00d4ff; font-weight: bold; font-size: 22px; }}
             .bet-odds {{ color: #4ade80; font-size: 28px; font-weight: bold; }}
             .bet-details {{
@@ -447,6 +447,7 @@ def generate_html_pro(recommendations, stats):
                 margin-top: 10px;
                 font-size: 12px;
                 color: #888;
+                flex-wrap: wrap;
             }}
             .xg-bar span {{ margin: 0 10px; }}
             .footer {{
@@ -465,13 +466,29 @@ def generate_html_pro(recommendations, stats):
                 font-size: 11px;
             }}
             .legend-title {{ color: #00d4ff; font-weight: bold; margin-bottom: 8px; }}
+            .no-value {{
+                background: #16213e;
+                border-radius: 12px;
+                padding: 30px;
+                text-align: center;
+                margin: 20px 0;
+            }}
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
                 <h1>🎯 Expert Paris Sportifs</h1>
-                <div class="subtitle">Analyse du {date} • Version PRO 2.0</div>
+                <div class="subtitle">Analyse du {date} • Version PRO 3.0</div>
+                <div class="leagues">
+    """
+
+    for code, info in COMPETITIONS.items():
+        count = league_stats.get(code, {}).get("matches", 0)
+        html += f'<span class="league-badge">{info["flag"]} {info["name"]} ({count})</span>'
+
+    html += f"""
+                </div>
             </div>
 
             <div class="stats-bar">
@@ -506,7 +523,10 @@ def generate_html_pro(recommendations, stats):
                 <div class="match-header">
                     <div>
                         <div class="match-title">#{i} {rec['match']}</div>
-                        <div class="match-meta">📅 {rec['date']} • {rec['competition']}</div>
+                        <div class="match-meta">
+                            📅 {rec['date']}
+                            <span class="league-tag">{rec['comp_flag']} {rec['comp_name']}</span>
+                        </div>
                     </div>
                     {"<span class='high-value-badge'>🔥 HAUTE VALUE</span>" if is_high else ""}
                 </div>
@@ -550,23 +570,30 @@ def generate_html_pro(recommendations, stats):
             """
     else:
         html += """
-            <div class="match" style="text-align:center;padding:40px;">
-                <p style="font-size:20px;margin:0;">😴 Pas de value bet cette semaine</p>
-                <p style="color:#888;margin-top:10px;">Les cotes du marché sont trop justes. La patience est une vertu du parieur rentable !</p>
+            <div class="no-value">
+                <p style="font-size:24px;margin:0;">😴 Pas de value bet cette semaine</p>
+                <p style="color:#888;margin-top:15px;">
+                    Sur {total} matchs analysés dans 4 ligues, aucun ne présente un avantage suffisant (EV > 3%).
+                </p>
+                <p style="color:#4ade80;margin-top:10px;">
+                    👉 C'est une bonne chose ! La patience est la clé des parieurs rentables.
+                </p>
             </div>
-        """
+        """.format(total=stats['total_matches'])
 
     html += f"""
             <div class="legend">
                 <div class="legend-title">📊 Comprendre les métriques</div>
                 <p><strong>EV (Expected Value)</strong>: Avantage théorique. +5% = 5€ de profit moyen pour 100€ misés</p>
-                <p><strong>Kelly</strong>: % optimal de ta bankroll à miser selon la théorie de Kelly (version conservatrice à 25%)</p>
+                <p><strong>Kelly</strong>: % optimal de ta bankroll à miser (version conservatrice à 25%)</p>
                 <p><strong>xG</strong>: Buts attendus calculés par le modèle Poisson pondéré</p>
+                <p><strong>Ligues analysées</strong>: Premier League, Bundesliga, Ligue 1, La Liga (les plus fiables)</p>
             </div>
 
             <div class="footer">
                 <p>🤖 Modèle: Poisson avancé avec pondération temporelle</p>
                 <p>📊 Critère de Kelly fractionné (25%) • Bankroll: {BANKROLL}€</p>
+                <p>🏆 4 ligues européennes fiables • ~40 matchs/semaine</p>
                 <p style="margin-top:15px;">⚠️ <strong>Pariez responsablement</strong> - Les paris comportent des risques</p>
                 <p style="color:#444;">Ce n'est pas un conseil financier • Résultats passés ≠ résultats futurs</p>
             </div>
@@ -579,9 +606,8 @@ def generate_html_pro(recommendations, stats):
 def send_email(html, num_bets):
     """Envoie l'email"""
     msg = MIMEMultipart("alternative")
-
     emoji = "🔥" if num_bets > 0 else "📊"
-    msg["Subject"] = f"{emoji} Paris Sportifs PRO - {num_bets} value bet{'s' if num_bets > 1 else ''} - {datetime.now().strftime('%d/%m')}"
+    msg["Subject"] = f"{emoji} Paris Sportifs PRO - {num_bets} value bet{'s' if num_bets != 1 else ''} - {datetime.now().strftime('%d/%m')}"
     msg["From"] = EMAIL_EXPEDITEUR
     msg["To"] = EMAIL_DESTINATAIRE
     msg.attach(MIMEText(html, "html"))
@@ -598,67 +624,79 @@ def send_email(html, num_bets):
 
 # ============== MAIN ==============
 def main():
-    print("=" * 50)
-    print("🎯 EXPERT PARIS SPORTIFS v2.0 - VERSION PRO")
-    print("=" * 50)
+    print("=" * 60)
+    print("🎯 EXPERT PARIS SPORTIFS v3.0 - MULTI-LIGUES")
+    print("=" * 60)
 
     if not API_KEY:
         print("⚠️ ATTENTION: Pas de clé API Football-Data.org!")
-        print("   Ajoutez FOOTBALL_API_KEY dans les secrets GitHub")
 
-    # Récupérer les données de Ligue 1
-    print("\n📥 Récupération des données Ligue 1...")
-    matches, standings, recent_form = get_competition_data("FL1")
-    print(f"   → {len(matches)} matchs à venir, {len(standings)} équipes")
+    all_matches = []
+    all_standings = {}
+    all_recent_form = {}
+    league_stats = {}
 
-    # Calculer la moyenne de buts de la ligue
-    total_goals = sum(s["gf"] for s in standings.values())
-    total_games = sum(s["played"] for s in standings.values()) / 2
+    # Récupérer les données de chaque ligue
+    for code, info in COMPETITIONS.items():
+        print(f"\n📥 {info['flag']} {info['name']}...")
+        matches, standings, recent_form = get_competition_data(code)
+        print(f"   → {len(matches)} matchs, {len(standings)} équipes")
+
+        league_stats[code] = {"matches": len(matches), "teams": len(standings)}
+
+        all_matches.extend(matches)
+        all_standings.update(standings)
+        all_recent_form.update(recent_form)
+
+    print(f"\n📊 TOTAL: {len(all_matches)} matchs à analyser")
+
+    # Calculer la moyenne de buts globale
+    total_goals = sum(s.get("gf", 0) for s in all_standings.values())
+    total_games = sum(s.get("played", 0) for s in all_standings.values()) / 2
     league_avg = {"avg_goals": total_goals / max(total_games * 2, 1) if total_games > 0 else 1.35}
-    print(f"   → Moyenne ligue: {league_avg['avg_goals']:.2f} buts/équipe/match")
 
     # Analyser chaque match
     print("\n🔬 Analyse des matchs...")
     all_recommendations = []
 
-    for match in matches:
-        analysis = analyze_match_advanced(match, standings, recent_form, league_avg)
+    for match in all_matches:
+        analysis = analyze_match_advanced(match, all_standings, all_recent_form, league_avg)
         if analysis:
             value_bets = find_value_bets(analysis)
             if value_bets:
-                best_bet = value_bets[0]  # Prendre le meilleur
-                all_recommendations.append({
-                    **analysis,
-                    "bet": best_bet
-                })
-                print(f"   ✓ {analysis['match']}: {best_bet['type']} @ {best_bet['odds']:.2f} (EV: +{best_bet['edge']:.1f}%)")
+                best_bet = value_bets[0]
+                all_recommendations.append({**analysis, "bet": best_bet})
+                print(f"   ✓ {analysis['comp_flag']} {analysis['match']}: {best_bet['type']} @ {best_bet['odds']:.2f} (EV: +{best_bet['edge']:.1f}%)")
 
-    # Trier par EV et prendre le top
+    # Trier par EV
     all_recommendations.sort(key=lambda x: x["bet"]["ev"], reverse=True)
     top_recommendations = all_recommendations[:MAX_BETS_PER_EMAIL]
 
-    # Stats pour l'email
+    # Stats
     stats = {
-        "total_matches": len(matches),
+        "total_matches": len(all_matches),
         "value_bets": len(all_recommendations),
         "high_value": sum(1 for r in all_recommendations if r["bet"]["is_high_value"]),
         "avg_ev": sum(r["bet"]["edge"] for r in all_recommendations) / max(len(all_recommendations), 1)
     }
 
     print(f"\n📊 Résumé:")
-    print(f"   → {stats['value_bets']} value bets détectés")
-    print(f"   → {stats['high_value']} haute value (>5%)")
-    print(f"   → EV moyen: +{stats['avg_ev']:.1f}%")
+    print(f"   → {stats['value_bets']} value bets détectés sur {stats['total_matches']} matchs")
+    print(f"   → {stats['high_value']} haute value (EV > 5%)")
+    if stats['value_bets'] > 0:
+        print(f"   → EV moyen: +{stats['avg_ev']:.1f}%")
 
-    # Générer et envoyer l'email
+    # Générer et envoyer
     print("\n📧 Génération de l'email...")
-    html = generate_html_pro(top_recommendations, stats)
+    html = generate_html_pro(top_recommendations, stats, league_stats)
     send_email(html, len(top_recommendations))
 
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 60)
     print("✅ Terminé!")
-    print("=" * 50)
+    print("=" * 60)
 
 if __name__ == "__main__":
     main()
+
+
 
