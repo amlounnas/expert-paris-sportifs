@@ -23,4 +23,8 @@ jobs:
         EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
         EMAIL_DESTINATAIRE: "am.lounnas@gmail.com"
         FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
+        ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: python email
