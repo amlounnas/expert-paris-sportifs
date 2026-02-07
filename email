@@ -547,7 +547,7 @@ def analyze_match_ultimate(match, standings, recent_form, league_avg, real_odds,
     }
 
 def find_value_bets_ultimate(analysis):
-    """Trouve les value bets avec vraies cotes"""
+    """Trouve les value bets UNIQUEMENT avec vraies cotes (pas de simulation)"""
     value_bets = []
 
     bet_types = {
@@ -555,36 +555,34 @@ def find_value_bets_ultimate(analysis):
         "N": {"name": "Match nul", "prob_key": "N"},
         "2": {"name": "Victoire extérieur", "prob_key": "2"},
         "+2.5": {"name": "Plus de 2.5 buts", "prob_key": "+2.5"},
-        "-2.5": {"name": "Moins de 2.5 buts", "prob_key": "-2.5"},
-        "BTTS": {"name": "Les 2 équipes marquent", "prob_key": "BTTS_yes"}
+        "-2.5": {"name": "Moins de 2.5 buts", "prob_key": "-2.5"}
     }
 
     real_odds = analysis.get("real_odds", {})
 
+    # Si pas de vraies cotes pour ce match, on skip
+    if not real_odds or all(v == 0 for v in real_odds.values()):
+        return []
+
     for bet_code, bet_info in bet_types.items():
         prob = analysis["probs"].get(bet_info["prob_key"], 0)
 
-        # Utiliser vraies cotes si disponibles, sinon simuler
-        if real_odds.get(bet_code, 0) > 0:
-            market_odds = real_odds[bet_code]
-            odds_source = "RÉELLE"
-        else:
-            # Simulation avec variance
-            if prob <= 0.01:
-                market_odds = 50.0
-            else:
-                fair_odds = 1 / prob
-                import random
-                random.seed(hash(analysis["match"] + bet_code + analysis["date"]))
-                odds_variance = random.uniform(0.95, 1.18)
-                market_odds = round(fair_odds * 0.94 * odds_variance, 2)
-            odds_source = "ESTIMÉE"
+        # UNIQUEMENT les vraies cotes - on ignore si pas disponible
+        market_odds = real_odds.get(bet_code, 0)
+        if market_odds <= 0:
+            continue
 
         ev = prob * market_odds
 
+        # Filtres de qualité
         if ev > MIN_VALUE_THRESHOLD and prob >= MIN_CONFIDENCE / 100:
+            # Limiter l'edge à 20% max (au-delà c'est suspect)
+            edge = (ev - 1) * 100
+            if edge > 20:
+                continue  # Edge trop élevé = données suspectes
+
             kelly = (prob * market_odds - 1) / (market_odds - 1) if market_odds > 1 else 0
-            kelly_fractional = max(0, kelly * KELLY_FRACTION)
+            kelly_fractional = max(0, min(kelly * KELLY_FRACTION, 0.10))  # Max 10% de la bankroll
             stake = round(BANKROLL * kelly_fractional, 2)
 
             value_bets.append({
@@ -592,9 +590,9 @@ def find_value_bets_ultimate(analysis):
                 "type_name": bet_info["name"],
                 "prob": prob,
                 "odds": market_odds,
-                "odds_source": odds_source,
+                "odds_source": "RÉELLE",
                 "ev": ev,
-                "edge": (ev - 1) * 100,
+                "edge": edge,
                 "kelly": kelly_fractional,
                 "stake": stake,
                 "confidence": int(prob * 100),
