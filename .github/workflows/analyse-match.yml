@@ -1,0 +1,30 @@
+name: Analyse Match
+
+on:
+  workflow_dispatch:
+    inputs:
+      match:
+        description: 'Équipes (ex: Liverpool Chelsea)'
+        required: true
+        type: string
+
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Analyse Match
+      env:
+        FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
+        ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        MATCH_QUERY: ${{ github.event.inputs.match }}
+      run: python bot_analyse
