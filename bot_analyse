@@ -1,0 +1,557 @@
+#!/usr/bin/env python3
+"""
+🤖 BOT TELEGRAM INTERACTIF - Expert Paris Sportifs
+===================================================
+Envoie le nom de 2 équipes et reçois l'analyse complète !
+
+Exemples:
+  Liverpool Chelsea
+  PSG Marseille
+  Real Barca
+"""
+
+import os, json, urllib.request, urllib.parse
+from datetime import datetime, timedelta
+from math import exp, factorial
+
+# ============== CONFIGURATION ==============
+FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY", "")
+ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
+WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+MATCH_QUERY = os.environ.get("MATCH_QUERY", "")  # Ex: "Liverpool Chelsea"
+
+FOOTBALL_API_URL = "https://api.football-data.org/v4"
+ODDS_API_URL = "https://api.the-odds-api.com/v4"
+WEATHER_API_URL = "https://api.openweathermap.org/data/2.5"
+
+# Paramètres
+BANKROLL = 1000
+KELLY_FRACTION = 0.25
+MIN_VALUE_THRESHOLD = 1.03
+HIGH_VALUE_THRESHOLD = 1.05
+MIN_CONFIDENCE = 45
+
+# Les 4 ligues
+COMPETITIONS = {
+    "PL": {"name": "Premier League", "flag": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "odds_key": "soccer_epl"},
+    "BL1": {"name": "Bundesliga", "flag": "🇩🇪", "odds_key": "soccer_germany_bundesliga"},
+    "FL1": {"name": "Ligue 1", "flag": "🇫🇷", "odds_key": "soccer_france_ligue_one"},
+    "PD": {"name": "La Liga", "flag": "🇪🇸", "odds_key": "soccer_spain_la_liga"}
+}
+
+# Alias des équipes (noms courts)
+TEAM_ALIASES = {
+    "psg": "Paris Saint-Germain",
+    "paris": "Paris Saint-Germain",
+    "om": "Olympique de Marseille",
+    "marseille": "Olympique de Marseille",
+    "ol": "Olympique Lyonnais",
+    "lyon": "Olympique Lyonnais",
+    "real": "Real Madrid",
+    "barca": "Barcelona",
+    "barcelona": "Barcelona",
+    "atleti": "Atlético",
+    "atletico": "Atlético",
+    "bayern": "Bayern",
+    "dortmund": "Borussia Dortmund",
+    "bvb": "Borussia Dortmund",
+    "liverpool": "Liverpool",
+    "chelsea": "Chelsea",
+    "arsenal": "Arsenal",
+    "manu": "Manchester United",
+    "manchester united": "Manchester United",
+    "man united": "Manchester United",
+    "mancity": "Manchester City",
+    "manchester city": "Manchester City",
+    "man city": "Manchester City",
+    "tottenham": "Tottenham",
+    "spurs": "Tottenham",
+    "newcastle": "Newcastle",
+    "villa": "Aston Villa",
+    "everton": "Everton",
+    "westham": "West Ham",
+    "west ham": "West Ham",
+    "leicester": "Leicester",
+    "lens": "Lens",
+    "lille": "Lille",
+    "monaco": "Monaco",
+    "nice": "Nice",
+    "rennes": "Rennes",
+    "nantes": "Nantes",
+    "strasbourg": "Strasbourg",
+    "brest": "Brest",
+    "auxerre": "Auxerre",
+    "reims": "Reims",
+    "leipzig": "Leipzig",
+    "leverkusen": "Leverkusen",
+    "frankfurt": "Frankfurt",
+    "wolfsburg": "Wolfsburg",
+    "freiburg": "Freiburg",
+    "stuttgart": "Stuttgart",
+    "sevilla": "Sevilla",
+    "betis": "Betis",
+    "villarreal": "Villarreal",
+    "bilbao": "Athletic",
+    "sociedad": "Real Sociedad",
+    "valencia": "Valencia"
+}
+
+# Villes pour météo
+TEAM_CITIES = {
+    "Paris Saint-Germain": "Paris", "Olympique de Marseille": "Marseille",
+    "Liverpool": "Liverpool", "Chelsea": "London", "Arsenal": "London",
+    "Manchester United": "Manchester", "Manchester City": "Manchester",
+    "Real Madrid": "Madrid", "Barcelona": "Barcelona", "Bayern": "Munich",
+    "Borussia Dortmund": "Dortmund"
+}
+
+# ============== FONCTIONS API ==============
+def fetch_json(url, headers=None):
+    try:
+        req = urllib.request.Request(url)
+        if headers:
+            for key, value in headers.items():
+                req.add_header(key, value)
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode())
+    except Exception as e:
+        print(f"⚠️ Erreur API: {e}")
+        return None
+
+def send_telegram(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("❌ Telegram non configuré")
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = urllib.parse.urlencode({
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }).encode()
+        req = urllib.request.Request(url, data=data)
+        urllib.request.urlopen(req, timeout=10)
+        return True
+    except Exception as e:
+        print(f"❌ Erreur Telegram: {e}")
+        return False
+
+# ============== RECHERCHE DE MATCH ==============
+def normalize_team_name(name):
+    """Normalise le nom d'équipe"""
+    name_lower = name.lower().strip()
+    return TEAM_ALIASES.get(name_lower, name)
+
+def find_match(team1_input, team2_input):
+    """Cherche un match dans les 4 ligues"""
+    team1 = normalize_team_name(team1_input)
+    team2 = normalize_team_name(team2_input)
+
+    print(f"🔍 Recherche: {team1} vs {team2}")
+
+    for code, info in COMPETITIONS.items():
+        data = fetch_json(
+            f"{FOOTBALL_API_URL}/competitions/{code}/matches?status=SCHEDULED",
+            {"X-Auth-Token": FOOTBALL_API_KEY}
+        )
+
+        if not data or "matches" not in data:
+            continue
+
+        for match in data["matches"]:
+            home = match["homeTeam"]["name"]
+            away = match["awayTeam"]["name"]
+
+            # Vérifier si les équipes correspondent
+            home_match = team1.lower() in home.lower() or team2.lower() in home.lower()
+            away_match = team1.lower() in away.lower() or team2.lower() in away.lower()
+
+            if home_match and away_match:
+                match_date = datetime.fromisoformat(match["utcDate"].replace("Z", "+00:00"))
+
+                # Seulement les matchs dans les 7 prochains jours
+                if match_date.replace(tzinfo=None) <= datetime.now() + timedelta(days=7):
+                    return {
+                        "home": home,
+                        "away": away,
+                        "date": match_date.strftime("%d/%m/%Y %H:%M"),
+                        "datetime": match_date,
+                        "competition": code,
+                        "comp_name": info["name"],
+                        "comp_flag": info["flag"],
+                        "odds_key": info["odds_key"]
+                    }
+
+    return None
+
+def get_standings(competition_code):
+    """Récupère le classement"""
+    standings = {}
+    data = fetch_json(
+        f"{FOOTBALL_API_URL}/competitions/{competition_code}/standings",
+        {"X-Auth-Token": FOOTBALL_API_KEY}
+    )
+
+    if data and "standings" in data:
+        for table in data["standings"]:
+            if table["type"] == "TOTAL":
+                for team in table["table"]:
+                    name = team["team"]["name"]
+                    standings[name] = {
+                        "position": team["position"],
+                        "played": team["playedGames"],
+                        "won": team["won"],
+                        "draw": team["draw"],
+                        "lost": team["lost"],
+                        "gf": team["goalsFor"],
+                        "ga": team["goalsAgainst"],
+                        "points": team["points"],
+                        "form": team.get("form", "")
+                    }
+    return standings
+
+def get_real_odds(odds_key, home_team, away_team):
+    """Récupère les vraies cotes"""
+    if not ODDS_API_KEY:
+        return {}
+
+    data = fetch_json(f"{ODDS_API_URL}/sports/{odds_key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,totals&oddsFormat=decimal")
+
+    if not data:
+        return {}
+
+    for event in data:
+        if home_team.lower() in event.get("home_team", "").lower() and away_team.lower() in event.get("away_team", "").lower():
+            best_odds = {"1": 0, "N": 0, "2": 0, "+2.5": 0, "-2.5": 0}
+
+            for bookmaker in event.get("bookmakers", []):
+                for market in bookmaker.get("markets", []):
+                    if market["key"] == "h2h":
+                        for outcome in market["outcomes"]:
+                            if outcome["name"] == event["home_team"]:
+                                best_odds["1"] = max(best_odds["1"], outcome["price"])
+                            elif outcome["name"] == event["away_team"]:
+                                best_odds["2"] = max(best_odds["2"], outcome["price"])
+                            elif outcome["name"] == "Draw":
+                                best_odds["N"] = max(best_odds["N"], outcome["price"])
+
+                    elif market["key"] == "totals":
+                        for outcome in market["outcomes"]:
+                            if outcome["name"] == "Over" and outcome.get("point") == 2.5:
+                                best_odds["+2.5"] = max(best_odds["+2.5"], outcome["price"])
+                            elif outcome["name"] == "Under" and outcome.get("point") == 2.5:
+                                best_odds["-2.5"] = max(best_odds["-2.5"], outcome["price"])
+
+            return best_odds
+
+    return {}
+
+def get_weather(home_team):
+    """Récupère la météo"""
+    if not WEATHER_API_KEY:
+        return {"factor": 1.0, "description": "N/A", "icon": "❓"}
+
+    # Chercher la ville
+    city = None
+    for team_key, team_city in TEAM_CITIES.items():
+        if team_key.lower() in home_team.lower():
+            city = team_city
+            break
+
+    if not city:
+        return {"factor": 1.0, "description": "N/A", "icon": "❓"}
+
+    data = fetch_json(f"{WEATHER_API_URL}/weather?q={urllib.parse.quote(city)}&appid={WEATHER_API_KEY}&units=metric")
+
+    if not data:
+        return {"factor": 1.0, "description": "N/A", "icon": "❓"}
+
+    try:
+        temp = data["main"]["temp"]
+        wind = data["wind"]["speed"]
+        rain = data.get("rain", {}).get("1h", 0)
+        description = data["weather"][0]["description"]
+
+        factor = 1.0
+        icon = "☀️"
+
+        if rain > 0:
+            factor *= 0.92
+            icon = "🌧️"
+        if wind > 10:
+            factor *= 0.95
+            icon = "💨"
+        if temp < 5:
+            factor *= 0.95
+            icon = "🥶"
+        elif temp > 30:
+            factor *= 0.93
+            icon = "🥵"
+
+        return {
+            "factor": factor,
+            "description": f"{temp:.0f}°C, {description}",
+            "icon": icon
+        }
+    except:
+        return {"factor": 1.0, "description": "N/A", "icon": "❓"}
+
+# ============== MODÈLE ==============
+def poisson_prob(lam, k):
+    if lam <= 0:
+        return 1.0 if k == 0 else 0.0
+    return (exp(-lam) * (lam ** k)) / factorial(min(k, 170))
+
+def calculate_form_score(form_string):
+    if not form_string:
+        return 0.5
+    score = 0
+    weights = [1.5, 1.3, 1.1, 0.9, 0.7]
+    for i, result in enumerate(form_string.replace(",", "")[:5]):
+        w = weights[i] if i < len(weights) else 0.5
+        if result == "W":
+            score += 3 * w
+        elif result == "D":
+            score += 1 * w
+    max_score = sum(w * 3 for w in weights[:len(form_string[:5])])
+    return score / max_score if max_score > 0 else 0.5
+
+def analyze_match(match, standings, real_odds, weather):
+    """Analyse complète du match"""
+    home_stats = standings.get(match["home"], {})
+    away_stats = standings.get(match["away"], {})
+
+    if not home_stats or not away_stats:
+        return None
+
+    # Calcul xG
+    avg_goals = 1.35
+    home_attack = home_stats["gf"] / max(home_stats["played"], 1)
+    home_defense = home_stats["ga"] / max(home_stats["played"], 1)
+    away_attack = away_stats["gf"] / max(away_stats["played"], 1)
+    away_defense = away_stats["ga"] / max(away_stats["played"], 1)
+
+    home_xg = (home_attack + away_defense) / 2 * 1.15  # Avantage domicile
+    away_xg = (away_attack + home_defense) / 2 / 1.15
+
+    # Ajustement forme
+    home_form = calculate_form_score(home_stats.get("form", ""))
+    away_form = calculate_form_score(away_stats.get("form", ""))
+    home_xg *= (0.9 + home_form * 0.2)
+    away_xg *= (0.9 + away_form * 0.2)
+
+    # Météo
+    weather_factor = weather.get("factor", 1.0)
+
+    # Probabilités
+    probs = {"1": 0, "N": 0, "2": 0, "+2.5": 0, "-2.5": 0}
+    for h in range(10):
+        for a in range(10):
+            p = poisson_prob(home_xg * weather_factor, h) * poisson_prob(away_xg * weather_factor, a)
+            if h > a:
+                probs["1"] += p
+            elif h == a:
+                probs["N"] += p
+            else:
+                probs["2"] += p
+            if h + a > 2.5:
+                probs["+2.5"] += p
+            else:
+                probs["-2.5"] += p
+
+    # Trouver le meilleur pari
+    best_bet = None
+    best_ev = 0
+
+    bet_names = {
+        "1": "Victoire domicile",
+        "N": "Match nul",
+        "2": "Victoire extérieur",
+        "+2.5": "Plus de 2.5 buts",
+        "-2.5": "Moins de 2.5 buts"
+    }
+
+    for bet_code, prob in probs.items():
+        odds = real_odds.get(bet_code, 0)
+        if odds <= 0:
+            continue
+
+        ev = prob * odds
+        edge = (ev - 1) * 100
+
+        # Filtres
+        if ev > MIN_VALUE_THRESHOLD and prob >= MIN_CONFIDENCE / 100 and edge <= 20:
+            if ev > best_ev:
+                best_ev = ev
+                kelly = (prob * odds - 1) / (odds - 1) if odds > 1 else 0
+                kelly_fractional = max(0, min(kelly * KELLY_FRACTION, 0.10))
+
+                best_bet = {
+                    "type": bet_code,
+                    "type_name": bet_names[bet_code],
+                    "prob": prob,
+                    "odds": odds,
+                    "ev": ev,
+                    "edge": edge,
+                    "kelly": kelly_fractional,
+                    "stake": round(BANKROLL * kelly_fractional, 2),
+                    "confidence": int(prob * 100)
+                }
+
+    return {
+        "match": match,
+        "home_xg": round(home_xg, 2),
+        "away_xg": round(away_xg, 2),
+        "home_pos": home_stats.get("position", "?"),
+        "away_pos": away_stats.get("position", "?"),
+        "home_form": home_form,
+        "away_form": away_form,
+        "weather": weather,
+        "probs": probs,
+        "real_odds": real_odds,
+        "best_bet": best_bet
+    }
+
+# ============== MAIN ==============
+def main():
+    print("=" * 50)
+    print("🤖 BOT ANALYSE MATCH")
+    print("=" * 50)
+
+    if not MATCH_QUERY:
+        msg = "❌ <b>Erreur</b>\n\nAucun match spécifié.\nUtilise: MATCH_QUERY=\"Liverpool Chelsea\""
+        send_telegram(msg)
+        print("❌ MATCH_QUERY vide")
+        return
+
+    # Parser la requête
+    parts = MATCH_QUERY.strip().split()
+    if len(parts) < 2:
+        msg = "❌ <b>Erreur</b>\n\nFormat invalide.\nExemple: Liverpool Chelsea"
+        send_telegram(msg)
+        print("❌ Format invalide")
+        return
+
+    # Essayer de trouver les 2 équipes
+    team1 = parts[0]
+    team2 = " ".join(parts[1:]) if len(parts) > 2 else parts[1]
+
+    # Gérer les noms composés (ex: "Man City" "Man United")
+    if len(parts) >= 3:
+        # Essayer team1 = 1 mot, team2 = reste
+        team1 = parts[0]
+        team2 = " ".join(parts[1:])
+
+        # Si pas trouvé, essayer team1 = 2 mots, team2 = reste
+        match = find_match(team1, team2)
+        if not match and len(parts) >= 3:
+            team1 = " ".join(parts[:2])
+            team2 = " ".join(parts[2:])
+            match = find_match(team1, team2)
+    else:
+        match = find_match(team1, team2)
+
+    if not match:
+        msg = f"❌ <b>Match non trouvé</b>\n\n\"{MATCH_QUERY}\" n'est pas dans les 7 prochains jours.\n\nVérifie l'orthographe ou essaie:\n• Liverpool Chelsea\n• PSG Marseille\n• Real Barca"
+        send_telegram(msg)
+        print("❌ Match non trouvé")
+        return
+
+    print(f"✅ Match trouvé: {match['home']} vs {match['away']}")
+
+    # Récupérer les données
+    print("📊 Récupération classement...")
+    standings = get_standings(match["competition"])
+
+    print("💰 Récupération cotes...")
+    real_odds = get_real_odds(match["odds_key"], match["home"], match["away"])
+
+    if not real_odds or all(v == 0 for v in real_odds.values()):
+        msg = f"⚠️ <b>Pas de cotes disponibles</b>\n\n{match['home']} vs {match['away']}\n📅 {match['date']}\n\nLes cotes ne sont pas encore sorties pour ce match."
+        send_telegram(msg)
+        print("❌ Pas de cotes")
+        return
+
+    print("🌡️ Récupération météo...")
+    weather = get_weather(match["home"])
+
+    print("🧮 Analyse...")
+    analysis = analyze_match(match, standings, real_odds, weather)
+
+    if not analysis:
+        msg = f"❌ <b>Analyse impossible</b>\n\nDonnées insuffisantes pour {match['home']} vs {match['away']}"
+        send_telegram(msg)
+        print("❌ Analyse impossible")
+        return
+
+    # Construire le message
+    bet = analysis["best_bet"]
+
+    if bet:
+        msg = f"""🎯 <b>ANALYSE MATCH</b>
+
+⚽ <b>{match['home']} vs {match['away']}</b>
+🏆 {match['comp_flag']} {match['comp_name']}
+📅 {match['date']}
+
+━━━━━━━━━━━━━━━━━━
+📊 <b>STATISTIQUES</b>
+
+⚽ xG: {analysis['home_xg']} - {analysis['away_xg']}
+📈 Positions: #{analysis['home_pos']} vs #{analysis['away_pos']}
+🔥 Forme: {analysis['home_form']:.0%} vs {analysis['away_form']:.0%}
+{analysis['weather']['icon']} {analysis['weather']['description']}
+
+━━━━━━━━━━━━━━━━━━
+💰 <b>COTES DISPONIBLES</b>
+
+1️⃣ Domicile: {analysis['real_odds'].get('1', 0):.2f}
+🤝 Nul: {analysis['real_odds'].get('N', 0):.2f}
+2️⃣ Extérieur: {analysis['real_odds'].get('2', 0):.2f}
+⬆️ +2.5 buts: {analysis['real_odds'].get('+2.5', 0):.2f}
+⬇️ -2.5 buts: {analysis['real_odds'].get('-2.5', 0):.2f}
+
+━━━━━━━━━━━━━━━━━━
+🎯 <b>MEILLEUR PARI</b>
+
+✅ <b>{bet['type']}</b> ({bet['type_name']})
+💰 Cote: <b>{bet['odds']:.2f}</b>
+📈 Edge: <b>+{bet['edge']:.1f}%</b>
+🎲 Confiance: {bet['confidence']}%
+💵 Mise suggérée: <b>{bet['stake']:.0f}€</b>
+
+━━━━━━━━━━━━━━━━━━
+⚠️ Pariez responsablement"""
+    else:
+        msg = f"""📊 <b>ANALYSE MATCH</b>
+
+⚽ <b>{match['home']} vs {match['away']}</b>
+🏆 {match['comp_flag']} {match['comp_name']}
+📅 {match['date']}
+
+━━━━━━━━━━━━━━━━━━
+📊 <b>STATISTIQUES</b>
+
+⚽ xG: {analysis['home_xg']} - {analysis['away_xg']}
+📈 Positions: #{analysis['home_pos']} vs #{analysis['away_pos']}
+{analysis['weather']['icon']} {analysis['weather']['description']}
+
+━━━━━━━━━━━━━━━━━━
+💰 <b>COTES</b>
+
+1️⃣ {analysis['real_odds'].get('1', 0):.2f} | 🤝 {analysis['real_odds'].get('N', 0):.2f} | 2️⃣ {analysis['real_odds'].get('2', 0):.2f}
+
+━━━━━━━━━━━━━━━━━━
+😴 <b>PAS DE VALUE BET</b>
+
+Aucun pari ne présente un avantage suffisant (edge > 3%).
+La patience est la clé ! 🎯"""
+
+    send_telegram(msg)
+    print("✅ Message envoyé!")
+    print(msg)
+
+if __name__ == "__main__":
+    main()
