@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-🎯 EXPERT PARIS SPORTIFS v4.0 - ULTIMATE EDITION
+🎯 EXPERT PARIS SPORTIFS v5.0 - ML ADVANCED
 =================================================
 FONCTIONNALITÉS:
 - 4 ligues fiables : Premier League, Bundesliga, Ligue 1, La Liga
@@ -247,8 +247,10 @@ def get_competition_data(competition_code):
             except:
                 continue
 
-    # Matchs terminés récents
-    data = fetch_football_api(f"/competitions/{competition_code}/matches?status=FINISHED&limit=50")
+    # Matchs terminés récents (augmenté à 100 pour H2H)
+    data = fetch_football_api(f"/competitions/{competition_code}/matches?status=FINISHED&limit=100")
+    h2h_data = {}  # Confrontations directes
+
     if data and "matches" in data:
         for m in data["matches"]:
             try:
@@ -258,17 +260,30 @@ def get_competition_data(competition_code):
                 away_goals = m["score"]["fullTime"]["away"] or 0
                 match_date = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
 
+                # Forme récente par équipe
                 for team, gf, ga, loc in [(home, home_goals, away_goals, "home"), (away, away_goals, home_goals, "away")]:
                     if team not in recent_form:
                         recent_form[team] = []
                     recent_form[team].append({
                         "date": match_date,
-                        "gf": gf, "ga": ga, "loc": loc
+                        "gf": gf, "ga": ga, "loc": loc,
+                        "opponent": away if team == home else home,
+                        "result": "W" if gf > ga else ("D" if gf == ga else "L")
                     })
+
+                # H2H - Confrontations directes
+                h2h_key = tuple(sorted([home, away]))
+                if h2h_key not in h2h_data:
+                    h2h_data[h2h_key] = []
+                h2h_data[h2h_key].append({
+                    "date": match_date,
+                    "home": home, "away": away,
+                    "home_goals": home_goals, "away_goals": away_goals
+                })
             except:
                 continue
 
-    return matches, standings, recent_form
+    return matches, standings, recent_form, h2h_data
 
 def normalize_team_name(name):
     """Normalise un nom d'équipe pour le matching"""
@@ -545,6 +560,172 @@ def calculate_form_score(form_string):
     max_score = sum(w * 3 for w in weights[:len(form_string[:5])])
     return score / max_score if max_score > 0 else 0.5
 
+# ============== NOUVELLES FONCTIONS ML AVANCÉES ==============
+def calculate_h2h_factor(home_team, away_team, h2h_data):
+    """Calcule le facteur basé sur les confrontations directes"""
+    h2h_key = tuple(sorted([home_team, away_team]))
+    matches = h2h_data.get(h2h_key, [])
+
+    if len(matches) < 2:
+        return {"home_factor": 1.0, "away_factor": 1.0, "avg_goals": None, "matches": 0}
+
+    home_wins, away_wins, draws = 0, 0, 0
+    total_home_goals, total_away_goals = 0, 0
+
+    for m in matches[-5:]:  # 5 dernières confrontations
+        if m["home"] == home_team:
+            hg, ag = m["home_goals"], m["away_goals"]
+        else:
+            hg, ag = m["away_goals"], m["home_goals"]
+
+        total_home_goals += hg
+        total_away_goals += ag
+
+        if hg > ag:
+            home_wins += 1
+        elif ag > hg:
+            away_wins += 1
+        else:
+            draws += 1
+
+    n = len(matches[-5:])
+    home_win_rate = home_wins / n
+    away_win_rate = away_wins / n
+
+    # Facteur H2H (max ±15%)
+    home_factor = 1.0 + (home_win_rate - 0.5) * 0.3
+    away_factor = 1.0 + (away_win_rate - 0.5) * 0.3
+
+    return {
+        "home_factor": max(0.85, min(1.15, home_factor)),
+        "away_factor": max(0.85, min(1.15, away_factor)),
+        "avg_goals": (total_home_goals + total_away_goals) / n if n > 0 else None,
+        "matches": n,
+        "home_wins": home_wins,
+        "away_wins": away_wins,
+        "draws": draws
+    }
+
+def calculate_momentum(recent_form, team):
+    """Calcule le momentum (série en cours)"""
+    matches = recent_form.get(team, [])
+    if len(matches) < 3:
+        return {"factor": 1.0, "streak": 0, "streak_type": None}
+
+    # Trier par date décroissante
+    sorted_matches = sorted(matches, key=lambda x: x["date"], reverse=True)[:5]
+
+    # Détecter série
+    streak = 0
+    streak_type = None
+
+    for m in sorted_matches:
+        result = m.get("result", "D")
+        if streak == 0:
+            streak_type = result
+            streak = 1
+        elif result == streak_type:
+            streak += 1
+        else:
+            break
+
+    # Facteur momentum
+    factor = 1.0
+    if streak >= 3:
+        if streak_type == "W":
+            factor = 1.0 + (streak - 2) * 0.03  # +3% par victoire après 2
+        elif streak_type == "L":
+            factor = 1.0 - (streak - 2) * 0.03  # -3% par défaite après 2
+
+    # Limiter à ±12%
+    factor = max(0.88, min(1.12, factor))
+
+    return {
+        "factor": factor,
+        "streak": streak,
+        "streak_type": streak_type
+    }
+
+def calculate_match_importance(home_stats, away_stats, total_teams=20):
+    """Calcule l'importance du match (fin de saison, enjeux)"""
+    home_pos = home_stats.get("position", 10)
+    away_pos = away_stats.get("position", 10)
+    played = home_stats.get("played", 0)
+
+    # Fin de saison (après 28 matchs sur 38)
+    season_progress = played / 38 if played > 0 else 0
+    is_late_season = season_progress > 0.75
+
+    importance = 1.0
+
+    if is_late_season:
+        # Lutte pour le titre (top 2)
+        if home_pos <= 2 or away_pos <= 2:
+            importance += 0.05
+
+        # Lutte pour la Ligue des Champions (top 4)
+        if 3 <= home_pos <= 6 or 3 <= away_pos <= 6:
+            importance += 0.03
+
+        # Lutte pour le maintien (bottom 3)
+        if home_pos >= total_teams - 2 or away_pos >= total_teams - 2:
+            importance += 0.05
+
+        # Derby ou match de rivalité (positions proches)
+        if abs(home_pos - away_pos) <= 3:
+            importance += 0.02
+
+    return {
+        "factor": min(1.15, importance),
+        "is_late_season": is_late_season,
+        "title_race": home_pos <= 2 or away_pos <= 2,
+        "relegation_battle": home_pos >= total_teams - 2 or away_pos >= total_teams - 2,
+        "european_race": 3 <= home_pos <= 6 or 3 <= away_pos <= 6
+    }
+
+def calculate_goals_trend(recent_form, team, location=None):
+    """Analyse la tendance des buts marqués/encaissés"""
+    matches = recent_form.get(team, [])
+    if len(matches) < 3:
+        return {"scoring_trend": 1.0, "conceding_trend": 1.0}
+
+    sorted_matches = sorted(matches, key=lambda x: x["date"], reverse=True)
+
+    # Filtrer par location si spécifié
+    if location:
+        sorted_matches = [m for m in sorted_matches if m.get("loc") == location]
+
+    if len(sorted_matches) < 3:
+        return {"scoring_trend": 1.0, "conceding_trend": 1.0}
+
+    # Comparer les 3 derniers aux 3 précédents
+    recent_3 = sorted_matches[:3]
+    previous_3 = sorted_matches[3:6] if len(sorted_matches) >= 6 else sorted_matches[3:]
+
+    if not previous_3:
+        return {"scoring_trend": 1.0, "conceding_trend": 1.0}
+
+    recent_gf = sum(m["gf"] for m in recent_3) / len(recent_3)
+    recent_ga = sum(m["ga"] for m in recent_3) / len(recent_3)
+    prev_gf = sum(m["gf"] for m in previous_3) / len(previous_3)
+    prev_ga = sum(m["ga"] for m in previous_3) / len(previous_3)
+
+    # Tendance (max ±10%)
+    scoring_trend = 1.0
+    if prev_gf > 0:
+        scoring_trend = min(1.10, max(0.90, recent_gf / prev_gf))
+
+    conceding_trend = 1.0
+    if prev_ga > 0:
+        conceding_trend = min(1.10, max(0.90, recent_ga / prev_ga))
+
+    return {
+        "scoring_trend": scoring_trend,
+        "conceding_trend": conceding_trend,
+        "recent_avg_gf": recent_gf,
+        "recent_avg_ga": recent_ga
+    }
+
 # ============== MODÈLES SPÉCIFIQUES PAR TYPE DE PARI ==============
 def model_1x2(home_xg, away_xg):
     """Modèle optimisé pour 1X2"""
@@ -595,53 +776,94 @@ def model_btts(home_xg, away_xg, weather_factor=1.0):
                 probs["BTTS_no"] += p
     return probs
 
-def analyze_match_ultimate(match, standings, recent_form, league_avg, real_odds, weather_data):
-    """Analyse ultime avec tous les facteurs"""
-    home_stats = calculate_weighted_stats(match["home"], standings, recent_form, "home")
-    away_stats = calculate_weighted_stats(match["away"], standings, recent_form, "away")
+def analyze_match_ultimate(match, standings, recent_form, league_avg, real_odds, weather_data, h2h_data=None):
+    """Analyse ultime avec tous les facteurs ML avancés"""
+    home_team = match["home"]
+    away_team = match["away"]
+
+    home_stats = calculate_weighted_stats(home_team, standings, recent_form, "home")
+    away_stats = calculate_weighted_stats(away_team, standings, recent_form, "away")
 
     if not home_stats or not away_stats:
         return None
 
     avg_goals = league_avg.get("avg_goals", 1.35)
 
-    # Force relative
+    # ============== FACTEURS DE BASE ==============
     home_attack_strength = home_stats["attack"] / avg_goals
     home_defense_strength = home_stats["defense"] / avg_goals
     away_attack_strength = away_stats["attack"] / avg_goals
     away_defense_strength = away_stats["defense"] / avg_goals
 
-    # Avantage domicile
+    # Avantage domicile de base
     home_advantage = 1.15
 
     # xG de base
     home_xg = avg_goals * home_attack_strength * away_defense_strength * home_advantage
     away_xg = avg_goals * away_attack_strength * home_defense_strength / home_advantage
 
-    # Ajustement forme
+    # ============== NOUVEAUX FACTEURS ML ==============
+
+    # 1. Confrontations directes (H2H)
+    h2h_factor = {"home_factor": 1.0, "away_factor": 1.0, "matches": 0}
+    if h2h_data:
+        h2h_factor = calculate_h2h_factor(home_team, away_team, h2h_data)
+        home_xg *= h2h_factor["home_factor"]
+        away_xg *= h2h_factor["away_factor"]
+
+    # 2. Momentum (séries en cours)
+    home_momentum = calculate_momentum(recent_form, home_team)
+    away_momentum = calculate_momentum(recent_form, away_team)
+    home_xg *= home_momentum["factor"]
+    away_xg *= away_momentum["factor"]
+
+    # 3. Importance du match
+    importance = calculate_match_importance(
+        standings.get(home_team, {}),
+        standings.get(away_team, {}),
+        total_teams=len([t for t in standings if standings[t].get("played", 0) > 0])
+    )
+
+    # 4. Tendance des buts
+    home_trend = calculate_goals_trend(recent_form, home_team, "home")
+    away_trend = calculate_goals_trend(recent_form, away_team, "away")
+    home_xg *= home_trend["scoring_trend"]
+    away_xg *= away_trend["scoring_trend"]
+
+    # 5. Ajustement forme (existant)
     form_factor_home = 0.9 + (home_stats["form_score"] * 0.2)
     form_factor_away = 0.9 + (away_stats["form_score"] * 0.2)
     home_xg *= form_factor_home
     away_xg *= form_factor_away
 
-    # Limites
+    # ============== LIMITES FINALES ==============
     home_xg = max(0.3, min(4.0, home_xg))
     away_xg = max(0.2, min(3.5, away_xg))
 
     # Facteur météo
     weather_factor = weather_data.get("factor", 1.0)
 
-    # Calcul des probas avec modèles spécifiques
+    # ============== CALCUL DES PROBABILITÉS ==============
     probs_1x2 = model_1x2(home_xg, away_xg)
     probs_ou = model_over_under(home_xg, away_xg, weather_factor)
     probs_btts = model_btts(home_xg, away_xg, weather_factor)
 
     all_probs = {**probs_1x2, **probs_ou, **probs_btts}
 
+    # ============== SCORE DE CONFIANCE GLOBAL ==============
+    # Plus de données = plus de confiance
+    confidence_boost = 0
+    if h2h_factor["matches"] >= 3:
+        confidence_boost += 0.02  # +2% si H2H fiable
+    if home_momentum["streak"] >= 3 or away_momentum["streak"] >= 3:
+        confidence_boost += 0.01  # +1% si momentum clair
+    if importance["is_late_season"]:
+        confidence_boost += 0.01  # +1% en fin de saison (stats plus fiables)
+
     return {
-        "match": f"{match['home']} vs {match['away']}",
-        "home": match["home"],
-        "away": match["away"],
+        "match": f"{home_team} vs {away_team}",
+        "home": home_team,
+        "away": away_team,
         "date": match["date"],
         "datetime": match.get("datetime"),
         "competition": match["competition"],
@@ -655,7 +877,13 @@ def analyze_match_ultimate(match, standings, recent_form, league_avg, real_odds,
         "away_pos": away_stats["position"],
         "probs": all_probs,
         "real_odds": real_odds,
-        "weather": weather_data
+        "weather": weather_data,
+        # Nouveaux facteurs ML
+        "h2h": h2h_factor,
+        "home_momentum": home_momentum,
+        "away_momentum": away_momentum,
+        "importance": importance,
+        "confidence_boost": confidence_boost
     }
 
 def find_value_bets_ultimate(analysis):
@@ -676,6 +904,9 @@ def find_value_bets_ultimate(analysis):
     if not real_odds or all(v == 0 for v in real_odds.values()):
         return []
 
+    # Bonus de confiance des facteurs ML
+    confidence_boost = analysis.get("confidence_boost", 0)
+
     for bet_code, bet_info in bet_types.items():
         prob = analysis["probs"].get(bet_info["prob_key"], 0)
 
@@ -684,31 +915,47 @@ def find_value_bets_ultimate(analysis):
         if market_odds <= 0:
             continue
 
-        ev = prob * market_odds
+        # Appliquer le boost de confiance à la probabilité
+        adjusted_prob = min(0.95, prob * (1 + confidence_boost))
+
+        ev = adjusted_prob * market_odds
 
         # Filtres de qualité
-        if ev > MIN_VALUE_THRESHOLD and prob >= MIN_CONFIDENCE / 100:
+        if ev > MIN_VALUE_THRESHOLD and adjusted_prob >= MIN_CONFIDENCE / 100:
             # Limiter l'edge à 20% max (au-delà c'est suspect)
             edge = (ev - 1) * 100
             if edge > 20:
                 continue  # Edge trop élevé = données suspectes
 
-            kelly = (prob * market_odds - 1) / (market_odds - 1) if market_odds > 1 else 0
+            kelly = (adjusted_prob * market_odds - 1) / (market_odds - 1) if market_odds > 1 else 0
             kelly_fractional = max(0, min(kelly * KELLY_FRACTION, 0.10))  # Max 10% de la bankroll
             stake = round(BANKROLL * kelly_fractional, 2)
+
+            # Score de qualité ML (plus les facteurs sont fiables, meilleur est le score)
+            ml_quality = 50  # Base
+            h2h = analysis.get("h2h", {})
+            if h2h.get("matches", 0) >= 3:
+                ml_quality += 15
+            if analysis.get("home_momentum", {}).get("streak", 0) >= 3:
+                ml_quality += 10
+            if analysis.get("away_momentum", {}).get("streak", 0) >= 3:
+                ml_quality += 10
+            if analysis.get("importance", {}).get("is_late_season", False):
+                ml_quality += 15
 
             value_bets.append({
                 "type": bet_code,
                 "type_name": bet_info["name"],
-                "prob": prob,
+                "prob": adjusted_prob,
                 "odds": market_odds,
                 "odds_source": "RÉELLE",
                 "ev": ev,
                 "edge": edge,
                 "kelly": kelly_fractional,
                 "stake": stake,
-                "confidence": int(prob * 100),
-                "is_high_value": ev >= HIGH_VALUE_THRESHOLD
+                "confidence": int(adjusted_prob * 100),
+                "is_high_value": ev >= HIGH_VALUE_THRESHOLD,
+                "ml_quality": min(100, ml_quality)  # Score qualité ML (0-100)
             })
 
     return sorted(value_bets, key=lambda x: x["ev"], reverse=True)
@@ -1006,7 +1253,7 @@ def generate_html_ultimate(recommendations, stats, league_stats, tracking_stats)
             <div class="header">
                 <h1>🎯 Expert Paris Sportifs</h1>
                 <div class="subtitle">Analyse du {date}</div>
-                <div class="version-badge">VERSION ULTIMATE 4.0</div>
+                <div class="version-badge">VERSION 5.0 ML ADVANCED</div>
                 <div class="leagues">
     """
 
@@ -1188,7 +1435,7 @@ def send_email(html, num_bets):
 # ============== MAIN ==============
 def main():
     print("=" * 70)
-    print("🎯 EXPERT PARIS SPORTIFS v4.0 - ULTIMATE EDITION")
+    print("🎯 EXPERT PARIS SPORTIFS v5.0 - ML ADVANCED")
     print("=" * 70)
 
     # Vérification APIs
@@ -1206,6 +1453,7 @@ def main():
     all_matches = []
     all_standings = {}
     all_recent_form = {}
+    all_h2h_data = {}  # NOUVEAU: Confrontations directes
     league_stats = {}
 
     # Récupérer données de chaque ligue
@@ -1215,8 +1463,8 @@ def main():
         print(f"\n{'='*50}")
         print(f"📥 {info['flag']} {info['name']}...")
 
-        matches, standings, recent_form = get_competition_data(code)
-        print(f"   → {len(matches)} matchs, {len(standings)} équipes")
+        matches, standings, recent_form, h2h_data = get_competition_data(code)
+        print(f"   → {len(matches)} matchs, {len(standings)} équipes, {len(h2h_data)} H2H")
 
         # Vraies cotes (maintenant retourne une liste)
         odds_list = get_real_odds(code)
@@ -1229,6 +1477,7 @@ def main():
         all_matches.extend(matches)
         all_standings.update(standings)
         all_recent_form.update(recent_form)
+        all_h2h_data.update(h2h_data)  # Fusionner les H2H
 
     print(f"\n{'='*50}")
     print(f"📊 TOTAL: {len(all_matches)} matchs à analyser")
@@ -1260,7 +1509,7 @@ def main():
             matches_without_odds += 1
             print(f"   ⚠️ Pas de cotes: {match['home']} vs {match['away']}")
 
-        analysis = analyze_match_ultimate(match, all_standings, all_recent_form, league_avg, real_odds, weather)
+        analysis = analyze_match_ultimate(match, all_standings, all_recent_form, league_avg, real_odds, weather, all_h2h_data)
 
         if analysis:
             value_bets = find_value_bets_ultimate(analysis)
