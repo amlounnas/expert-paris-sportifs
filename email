@@ -144,7 +144,8 @@ def fetch_odds_api(sport_key):
     if not ODDS_API_KEY:
         return None
 
-    url = f"{ODDS_API_URL}/sports/{sport_key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,totals&oddsFormat=decimal"
+    # Ajouter plusieurs régions pour plus de cotes disponibles
+    url = f"{ODDS_API_URL}/sports/{sport_key}/odds/?apiKey={ODDS_API_KEY}&regions=eu,uk&markets=h2h,totals&oddsFormat=decimal"
     return fetch_json(url)
 
 def fetch_weather(city):
@@ -269,6 +270,99 @@ def get_competition_data(competition_code):
 
     return matches, standings, recent_form
 
+def normalize_team_name(name):
+    """Normalise un nom d'équipe pour le matching"""
+    import re
+    import unicodedata
+
+    # Normaliser accents (é → e, ü → u, etc.)
+    name = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode('ascii')
+    name = name.lower()
+
+    # Retirer les suffixes/préfixes courants
+    name = re.sub(r'\b(fc|cf|sc|ac|afc|ssc|rc|as|ogc|vfb|vfl|tsv|fsv|sv|cd|ud|rcd|ca|hsc|osc)\b', '', name)
+    name = re.sub(r'\b(1846|1848|1899|1901|1904|1905|1907|1909|1911|1919|1963|04|05|09)\b', '', name)
+    name = re.sub(r'\b(de madrid|de barcelona|de futbol|balompie|de vigo)\b', '', name)
+    name = re.sub(r'\bstade\b', '', name)  # "Stade Rennais" → "Rennais"
+    name = re.sub(r'\bolympique\b', '', name)  # "Olympique Lyonnais" → "Lyonnais"
+    name = re.sub(r'\bborussia\b', '', name)  # "Borussia Dortmund" → "Dortmund"
+
+    # Normaliser espaces
+    name = ' '.join(name.split())
+    return name.strip()
+
+# Aliases connus pour le matching
+TEAM_ALIASES_MATCHING = {
+    "psg": "paris saint-germain",
+    "om": "marseille",
+    "ol": "lyon",
+    "asse": "saint-etienne",
+    "losc": "lille",
+    "manu": "manchester united",
+    "man utd": "manchester united",
+    "man city": "manchester city",
+    "spurs": "tottenham",
+    "bvb": "dortmund",
+    "fcb": "barcelona",
+    "barca": "barcelona",
+    "real": "real madrid",
+    "atleti": "atletico madrid",
+    "atletico": "atletico madrid",
+    "bayern": "bayern munich",
+    "bayern munchen": "bayern munich",
+    "rennes": "rennais",
+    "lens": "lens",
+    "nice": "nice",
+    "monaco": "monaco",
+    "lyon": "lyonnais",
+    "marseille": "marseille",
+    "nantes": "nantes",
+    "strasbourg": "strasbourg",
+    "brest": "brestois",
+    "reims": "reims",
+    "toulouse": "toulouse",
+    "montpellier": "montpellier",
+}
+
+def match_team_names(name1, name2):
+    """Vérifie si deux noms d'équipes correspondent"""
+    n1 = normalize_team_name(name1)
+    n2 = normalize_team_name(name2)
+
+    # Matching exact après normalisation
+    if n1 == n2:
+        return True
+
+    # Vérifier via aliases
+    n1_alias = TEAM_ALIASES_MATCHING.get(n1, n1)
+    n2_alias = TEAM_ALIASES_MATCHING.get(n2, n2)
+    if n1_alias == n2_alias:
+        return True
+
+    # Matching partiel (un nom contient l'autre ou vice versa)
+    if len(n1) >= 4 and len(n2) >= 4:
+        if n1 in n2 or n2 in n1:
+            return True
+
+    # Comparer les mots clés (au moins un mot significatif en commun)
+    words1 = set(w for w in n1.split() if len(w) >= 4)
+    words2 = set(w for w in n2.split() if len(w) >= 4)
+    if words1 and words2:
+        common = words1 & words2
+        if common:
+            return True
+
+    # Cas spécial: comparer le premier mot significatif
+    if words1 and words2:
+        # Si un des mots est contenu dans l'autre
+        for w1 in words1:
+            for w2 in words2:
+                if len(w1) >= 4 and len(w2) >= 4:
+                    if w1 in w2 or w2 in w1:
+                        return True
+
+    return False
+
 def get_real_odds(competition_code):
     """Récupère les vraies cotes du marché"""
     odds_key = COMPETITIONS.get(competition_code, {}).get("odds_key")
@@ -279,11 +373,10 @@ def get_real_odds(competition_code):
     if not data:
         return {}
 
-    odds_map = {}
+    odds_list = []  # Liste avec les noms originaux pour matching flexible
     for event in data:
         home = event.get("home_team", "")
         away = event.get("away_team", "")
-        match_key = f"{home} vs {away}"
 
         best_odds = {"1": 0, "N": 0, "2": 0, "+2.5": 0, "-2.5": 0}
 
@@ -305,9 +398,28 @@ def get_real_odds(competition_code):
                         elif outcome["name"] == "Under" and outcome.get("point") == 2.5:
                             best_odds["-2.5"] = max(best_odds["-2.5"], outcome["price"])
 
-        odds_map[match_key] = best_odds
+        odds_list.append({
+            "home": home,
+            "away": away,
+            "odds": best_odds
+        })
 
-    return odds_map
+    return odds_list
+
+def find_odds_for_match(match_home, match_away, odds_list):
+    """Trouve les cotes pour un match avec matching flexible"""
+    for odds_event in odds_list:
+        odds_home = odds_event["home"]
+        odds_away = odds_event["away"]
+
+        # Vérifier si les deux équipes matchent
+        home_match = match_team_names(match_home, odds_home)
+        away_match = match_team_names(match_away, odds_away)
+
+        if home_match and away_match:
+            return odds_event["odds"]
+
+    return {}
 
 def get_weather_factor(home_team, match_datetime):
     """Calcule le facteur météo"""
@@ -1094,10 +1206,11 @@ def main():
     all_matches = []
     all_standings = {}
     all_recent_form = {}
-    all_real_odds = {}
     league_stats = {}
 
     # Récupérer données de chaque ligue
+    all_odds_lists = {}  # Stocker les listes de cotes par ligue
+
     for code, info in COMPETITIONS.items():
         print(f"\n{'='*50}")
         print(f"📥 {info['flag']} {info['name']}...")
@@ -1105,17 +1218,17 @@ def main():
         matches, standings, recent_form = get_competition_data(code)
         print(f"   → {len(matches)} matchs, {len(standings)} équipes")
 
-        # Vraies cotes
-        real_odds = get_real_odds(code)
-        if real_odds:
-            print(f"   → {len(real_odds)} matchs avec cotes réelles")
+        # Vraies cotes (maintenant retourne une liste)
+        odds_list = get_real_odds(code)
+        if odds_list:
+            print(f"   → {len(odds_list)} matchs avec cotes réelles disponibles")
+        all_odds_lists[code] = odds_list or []
 
         league_stats[code] = {"matches": len(matches), "teams": len(standings)}
 
         all_matches.extend(matches)
         all_standings.update(standings)
         all_recent_form.update(recent_form)
-        all_real_odds.update(real_odds)
 
     print(f"\n{'='*50}")
     print(f"📊 TOTAL: {len(all_matches)} matchs à analyser")
@@ -1128,14 +1241,24 @@ def main():
     # Analyser chaque match
     print("\n🔬 Analyse des matchs...")
     all_recommendations = []
+    matches_with_odds = 0
+    matches_without_odds = 0
 
     for match in all_matches:
         # Météo
         weather = get_weather_factor(match["home"], match.get("datetime"))
 
-        # Vraies cotes pour ce match
-        match_key = f"{match['home']} vs {match['away']}"
-        real_odds = all_real_odds.get(match_key, {})
+        # Vraies cotes pour ce match (matching flexible)
+        comp_code = match["competition"]
+        odds_list = all_odds_lists.get(comp_code, [])
+        real_odds = find_odds_for_match(match["home"], match["away"], odds_list)
+
+        # Diagnostic
+        if real_odds and any(v > 0 for v in real_odds.values()):
+            matches_with_odds += 1
+        else:
+            matches_without_odds += 1
+            print(f"   ⚠️ Pas de cotes: {match['home']} vs {match['away']}")
 
         analysis = analyze_match_ultimate(match, all_standings, all_recent_form, league_avg, real_odds, weather)
 
@@ -1148,6 +1271,11 @@ def main():
 
                 odds_tag = "🎯" if best_bet.get("odds_source") == "RÉELLE" else "📊"
                 print(f"   {odds_tag} {analysis['comp_flag']} {analysis['match']}: {best_bet['type']} @ {best_bet['odds']:.2f} (EV: +{best_bet['edge']:.1f}%)")
+
+    # Rapport sur les cotes
+    print(f"\n📊 Diagnostic cotes:")
+    print(f"   → {matches_with_odds}/{len(all_matches)} matchs avec cotes trouvées")
+    print(f"   → {matches_without_odds}/{len(all_matches)} matchs SANS cotes")
 
     # Trier par EV
     all_recommendations.sort(key=lambda x: x["bet"]["ev"], reverse=True)
