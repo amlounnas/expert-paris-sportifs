@@ -1,0 +1,32 @@
+name: Settle Results
+
+on:
+  schedule:
+    - cron: '0 8 * * *'   # Quotidien 08:00 UTC
+  workflow_dispatch:
+
+jobs:
+  settle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Settle pending bets
+      env:
+        FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
+      run: python settle.py
+
+    - name: Commit tracking
+      run: |
+        git config user.name "paris-bot"
+        git config user.email "bot@paris-sportifs.local"
+        git add tracking.json
+        git commit -m "settle: update results [skip ci]" || echo "no changes to commit"
+        git push

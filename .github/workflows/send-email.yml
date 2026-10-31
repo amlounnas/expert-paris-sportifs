@@ -9,6 +9,8 @@ on:
 jobs:
   send-betting-tips:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
     - uses: actions/checkout@v4
 
@@ -19,12 +21,17 @@ jobs:
 
     - name: Run Expert PRO
       env:
-        EMAIL_EXPEDITEUR: ${{ secrets.EMAIL_EXPEDITEUR }}
-        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-        EMAIL_DESTINATAIRE: "am.lounnas@gmail.com"
         FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
         ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: python email
+
+    - name: Commit tracking
+      run: |
+        git config user.name "paris-bot"
+        git config user.email "bot@paris-sportifs.local"
+        git add tracking.json
+        git commit -m "tracking: add bets [skip ci]" || echo "no changes to commit"
+        git push

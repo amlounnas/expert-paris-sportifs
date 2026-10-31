@@ -110,9 +110,12 @@ TEAM_CITIES = {
 # Paramètres du modèle
 BANKROLL = 1000  # € - À ajuster
 KELLY_FRACTION = 0.25
-MIN_VALUE_THRESHOLD = 1.03
-HIGH_VALUE_THRESHOLD = 1.05
+MIN_VALUE_THRESHOLD = 1.10  # Edge réel requis (recalibré) — était 1.03 (faux edge)
+HIGH_VALUE_THRESHOLD = 1.15
 MIN_CONFIDENCE = 45
+# Calibration contre le marché: poids de la proba implicite de la cote dans le mélange.
+# Corrige la sur-confiance systématique du modèle (backtest: +8pt d'écart, ROI -51.6%).
+MARKET_WEIGHT = 0.60
 MAX_BETS_PER_EMAIL = 5
 
 # Tracking file (dans le repo GitHub)
@@ -776,7 +779,7 @@ def model_btts(home_xg, away_xg, weather_factor=1.0):
                 probs["BTTS_no"] += p
     return probs
 
-def analyze_match_ultimate(match, standings, recent_form, league_avg, real_odds, weather_data, h2h_data=None):
+def analyze_match_ultimate(match, standings, recent_form, league_avg, real_odds, weather_data, h2h_data=None, xg_map=None):
     """Analyse ultime avec tous les facteurs ML avancés"""
     home_team = match["home"]
     away_team = match["away"]
@@ -787,6 +790,17 @@ def analyze_match_ultimate(match, standings, recent_form, league_avg, real_odds,
     if not home_stats or not away_stats:
         return None
 
+    # Utiliser le VRAI xG (Understat) quand dispo — meilleur prédicteur que les buts marqués
+    if xg_map:
+        hx = xg_map.get(home_team)
+        ax = xg_map.get(away_team)
+        if hx and hx.get("played", 0) >= 3:
+            home_stats["attack"] = hx.get("xg_home") or hx.get("xg") or home_stats["attack"]
+            home_stats["defense"] = hx.get("xga_home") or hx.get("xga") or home_stats["defense"]
+        if ax and ax.get("played", 0) >= 3:
+            away_stats["attack"] = ax.get("xg_away") or ax.get("xg") or away_stats["attack"]
+            away_stats["defense"] = ax.get("xga_away") or ax.get("xga") or away_stats["defense"]
+
     avg_goals = league_avg.get("avg_goals", 1.35)
 
     # ============== FACTEURS DE BASE ==============
@@ -795,8 +809,8 @@ def analyze_match_ultimate(match, standings, recent_form, league_avg, real_odds,
     away_attack_strength = away_stats["attack"] / avg_goals
     away_defense_strength = away_stats["defense"] / avg_goals
 
-    # Avantage domicile de base
-    home_advantage = 1.15
+    # Avantage domicile de base (réduit: l'empilement multiplicatif gonflait l'xG)
+    home_advantage = 1.10
 
     # xG de base
     home_xg = avg_goals * home_attack_strength * away_defense_strength * home_advantage
@@ -837,8 +851,10 @@ def analyze_match_ultimate(match, standings, recent_form, league_avg, real_odds,
     away_xg *= form_factor_away
 
     # ============== LIMITES FINALES ==============
-    home_xg = max(0.3, min(4.0, home_xg))
-    away_xg = max(0.2, min(3.5, away_xg))
+    # Plafonds réalistes: l'xG réel par équipe dépasse rarement ~2.2 (top européen).
+    # L'ancien plafond (4.0/3.5) autorisait des xG irréalistes → probas de buts explosées.
+    home_xg = max(0.3, min(2.2, home_xg))
+    away_xg = max(0.2, min(1.8, away_xg))
 
     # Facteur météo
     weather_factor = weather_data.get("factor", 1.0)
@@ -915,19 +931,25 @@ def find_value_bets_ultimate(analysis):
         if market_odds <= 0:
             continue
 
-        # Appliquer le boost de confiance à la probabilité
-        adjusted_prob = min(0.95, prob * (1 + confidence_boost))
+        # Probabilité brute du modèle (sans boost inflationniste)
+        adjusted_prob = min(0.95, prob)
 
-        ev = adjusted_prob * market_odds
+        # CALIBRATION CONTRE LE MARCHÉ: la cote du bookmaker est un prior fort.
+        # On rétrécit la proba du modèle vers la proba implicite de la cote.
+        # Corrige la sur-confiance systématique (backtest: +8pt d'écart, ROI -51.6%).
+        implied_prob = 1.0 / market_odds
+        calibrated_prob = adjusted_prob * (1.0 - MARKET_WEIGHT) + implied_prob * MARKET_WEIGHT
+
+        ev = calibrated_prob * market_odds
 
         # Filtres de qualité
-        if ev > MIN_VALUE_THRESHOLD and adjusted_prob >= MIN_CONFIDENCE / 100:
+        if ev > MIN_VALUE_THRESHOLD and calibrated_prob >= MIN_CONFIDENCE / 100:
             # Limiter l'edge à 20% max (au-delà c'est suspect)
             edge = (ev - 1) * 100
             if edge > 20:
                 continue  # Edge trop élevé = données suspectes
 
-            kelly = (adjusted_prob * market_odds - 1) / (market_odds - 1) if market_odds > 1 else 0
+            kelly = (calibrated_prob * market_odds - 1) / (market_odds - 1) if market_odds > 1 else 0
             kelly_fractional = max(0, min(kelly * KELLY_FRACTION, 0.10))  # Max 10% de la bankroll
             stake = round(BANKROLL * kelly_fractional, 2)
 
@@ -946,14 +968,14 @@ def find_value_bets_ultimate(analysis):
             value_bets.append({
                 "type": bet_code,
                 "type_name": bet_info["name"],
-                "prob": adjusted_prob,
+                "prob": calibrated_prob,
                 "odds": market_odds,
                 "odds_source": "RÉELLE",
                 "ev": ev,
                 "edge": edge,
                 "kelly": kelly_fractional,
                 "stake": stake,
-                "confidence": int(adjusted_prob * 100),
+                "confidence": int(calibrated_prob * 100),
                 "is_high_value": ev >= HIGH_VALUE_THRESHOLD,
                 "ml_quality": min(100, ml_quality)  # Score qualité ML (0-100)
             })
@@ -980,16 +1002,27 @@ def save_tracking(tracking):
         print(f"⚠️ Erreur sauvegarde tracking: {e}")
 
 def add_bet_to_tracking(tracking, rec):
-    """Ajoute un pari au tracking"""
+    """Ajoute un pari au tracking (dédupliqué par id stable)"""
     bet = rec["bet"]
     bet_id = hashlib.md5(f"{rec['match']}{rec['date']}{bet['type']}".encode()).hexdigest()[:8]
+
+    # Déduplication: ne pas re-tracker un pari déjà présent (le bot re-recommande
+    # le même match à des cotes mises à jour plusieurs fois par semaine)
+    if any(b.get("id") == bet_id for b in tracking["bets"]):
+        return bet_id
+
+    match_iso = rec["datetime"].isoformat() if rec.get("datetime") else None
 
     tracking["bets"].append({
         "id": bet_id,
         "date": datetime.now().isoformat(),
         "match": rec["match"],
         "match_date": rec["date"],
+        "match_iso": match_iso,
+        "home": rec.get("home"),
+        "away": rec.get("away"),
         "competition": rec["comp_name"],
+        "competition_code": rec.get("competition"),
         "bet_type": bet["type"],
         "odds": bet["odds"],
         "stake": bet["stake"],
@@ -1432,6 +1465,57 @@ def send_email(html, num_bets):
         print(f"❌ Erreur email: {e}")
         return False
 
+# ============== XG UNDERSTAT ==============
+def _norm_xg(name):
+    """Normalisation stricte pour matcher les noms Understat <-> football-data."""
+    import re, unicodedata
+    name = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode('ascii')
+    name = name.lower()
+    name = name.replace('-', ' ').replace('&', ' ').replace('.', ' ')
+    # Équivalences anglicisées / noms courts spécifiques
+    name = name.replace('cologne', 'koln')
+    name = name.replace('rasenballsport', 'rb')
+    name = name.replace('m gladbach', 'monchengladbach')
+    name = name.replace('munich', 'munchen')
+    # Formes adjectives françaises (Stade Rennais, Stade Brestois, Olympique Lyonnais)
+    name = name.replace('rennais', 'rennes').replace('brestois', 'brest').replace('lyonnais', 'lyon')
+    name = re.sub(r'\b(fc|cf|sc|ac|afc|ssc|rc|as|aj|es|ogc|vfb|vfl|tsv|fsv|sv|cd|ud|rcd|ca|hsc|osc|club|de|stade|olympique|borussia|deportivo|hotspur|hove|albion|wanderers|alsace)\b', '', name)
+    name = re.sub(r'\b\d+\b', '', name)
+    return ' '.join(name.split()).strip()
+
+
+def build_xg_map(all_standings):
+    """Retourne {nom_football_data: {xg, xga, xg_home, ...}} depuis Understat."""
+    try:
+        import understat
+    except ImportError:
+        return {}
+
+    xg_map = {}
+    season = understat.get_season()
+    for code, league_key in understat.LEAGUE_KEYS.items():
+        data = understat.fetch_league_xg(league_key, season)
+        if not data:
+            continue
+        norm_data = {_norm_xg(t): s for t, s in data.items()}
+        for fname in all_standings:
+            nf = _norm_xg(fname)
+            if not nf:
+                continue
+            if nf in norm_data:
+                xg_map[fname] = norm_data[nf]
+                continue
+            # Fallback: le nom court Understat est un préfixe (mot par mot) du nom
+            # football-data (ex: "Hull" vs "Hull City", "Coventry" vs "Coventry City").
+            # Uniquement si la correspondance est non ambiguë.
+            nf_words = nf.split()
+            candidates = [nt for nt in norm_data
+                          if nt.split() == nf_words[:len(nt.split())]]
+            if len(candidates) == 1:
+                xg_map[fname] = norm_data[candidates[0]]
+    return xg_map
+
+
 # ============== MAIN ==============
 def main():
     print("=" * 70)
@@ -1447,6 +1531,16 @@ def main():
 
     # Charger tracking
     tracking = load_tracking()
+
+    # Règlement des paris pending (résultats réels via Football-Data.org)
+    try:
+        import settle
+        settled = settle.settle_bets(tracking)
+        if settled:
+            print(f"\n🏁 {settled} pari(s) réglé(s) depuis le dernier run")
+    except ImportError:
+        pass
+
     tracking_stats = calculate_tracking_stats(tracking)
     print(f"\n📈 Historique: {tracking_stats.get('total_bets', 0)} paris, ROI: {tracking_stats['roi']:+.1f}%")
 
@@ -1479,6 +1573,13 @@ def main():
         all_recent_form.update(recent_form)
         all_h2h_data.update(h2h_data)  # Fusionner les H2H
 
+    # Vrai xG (Understat)
+    xg_map = build_xg_map(all_standings)
+    if xg_map:
+        print(f"\n📊 xG réel (Understat): {len(xg_map)}/{len(all_standings)} équipes mappées")
+    else:
+        print("\n⚠️ xG Understat indisponible — retombe sur l'approximation par buts")
+
     print(f"\n{'='*50}")
     print(f"📊 TOTAL: {len(all_matches)} matchs à analyser")
 
@@ -1509,7 +1610,7 @@ def main():
             matches_without_odds += 1
             print(f"   ⚠️ Pas de cotes: {match['home']} vs {match['away']}")
 
-        analysis = analyze_match_ultimate(match, all_standings, all_recent_form, league_avg, real_odds, weather, all_h2h_data)
+        analysis = analyze_match_ultimate(match, all_standings, all_recent_form, league_avg, real_odds, weather, all_h2h_data, xg_map)
 
         if analysis:
             value_bets = find_value_bets_ultimate(analysis)
@@ -1550,18 +1651,17 @@ def main():
         print(f"   📝 Tracking: {rec['match']} ({bet_id})")
     save_tracking(tracking)
 
-    # Générer et envoyer email
-    print("\n📧 Génération de l'email...")
-    html = generate_html_ultimate(top_recommendations, stats, league_stats, tracking_stats)
-    send_email(html, len(top_recommendations))
-
-    # Alertes Telegram
-    if TELEGRAM_BOT_TOKEN and top_recommendations:
+    # Alertes Telegram (seul canal de diffusion — l'email a été supprimé)
+    if TELEGRAM_BOT_TOKEN:
         print("\n📱 Envoi alertes Telegram...")
-        for rec in top_recommendations[:3]:  # Top 3 seulement
-            bet = rec["bet"]
-            msg = f"""
-🎯 <b>ALERTE VALUE BET</b>
+        if top_recommendations:
+            send_telegram(
+                f"📊 <b>{stats['value_bets']} value bet(s)</b> détecté(s) "
+                f"sur {stats['total_matches']} matchs analysés"
+            )
+            for rec in top_recommendations[:MAX_BETS_PER_EMAIL]:
+                bet = rec["bet"]
+                msg = f"""🎯 <b>ALERTE VALUE BET</b>
 
 ⚽ {rec['match']}
 🏆 {rec['comp_flag']} {rec['comp_name']}
@@ -1572,10 +1672,14 @@ def main():
 🎲 Confiance: {bet['confidence']}%
 💵 Mise suggérée: <b>{bet['stake']:.0f}€</b>
 
-{rec['weather'].get('icon', '')} {rec['weather'].get('description', '')}
-            """
-            if send_telegram(msg.strip()):
-                print(f"   ✅ Telegram: {rec['match']}")
+{rec['weather'].get('icon', '')} {rec['weather'].get('description', '')}"""
+                if send_telegram(msg.strip()):
+                    print(f"   ✅ Telegram: {rec['match']}")
+        else:
+            send_telegram(
+                f"😴 {stats['total_matches']} matchs analysés — aucun value bet. "
+                f"La patience est la clé. 🎯"
+            )
 
     print("\n" + "=" * 70)
     print("✅ Terminé!")
