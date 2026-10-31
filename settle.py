@@ -110,6 +110,10 @@ def settle_bets(tracking, verbose=True):
 
         b["status"] = outcome
         b["result"] = f"{hg}-{ag}"
+        # CLV: écart entre la cote d'ouverture et la dernière cote observée
+        opening = b.get("opening_odds") or b.get("odds", 0)
+        latest = b.get("latest_odds") or opening
+        b["clv"] = round((latest - opening) / opening, 4) if opening else 0.0
         if outcome == "won":
             b["profit"] = round(b["stake"] * (b["odds"] - 1), 2)
         else:
@@ -134,9 +138,12 @@ def _recalc_stats(tracking):
     profit = sum(b.get("profit", 0) or 0 for b in bets if b.get("status") != "pending")
     staked = sum(b.get("stake", 0) for b in bets if b.get("status") != "pending")
     roi = (profit / staked * 100) if staked > 0 else 0
+    clvs = [b["clv"] for b in bets if b.get("clv") is not None]
+    avg_clv = (sum(clvs) / len(clvs) * 100) if clvs else 0.0
     tracking["stats"] = {
         "total": total, "won": won, "lost": lost, "pending": pending,
         "profit": round(profit, 2), "staked": round(staked, 2), "roi": round(roi, 1),
+        "avg_clv": round(avg_clv, 2),
     }
 
 
@@ -175,7 +182,8 @@ def main():
     s = tracking.get("stats", {})
     print(f"\n✅ {settled} pari(s) réglé(s) ce run")
     print(f"📈 Bilan: {s.get('won', 0)}W / {s.get('lost', 0)}L | "
-          f"ROI {s.get('roi', 0):+.1f}% | Profit {s.get('profit', 0):+.2f}€")
+          f"ROI {s.get('roi', 0):+.1f}% | CLV {s.get('avg_clv', 0):+.2f}% | "
+          f"Profit {s.get('profit', 0):+.2f}€")
 
 
 if __name__ == "__main__":
