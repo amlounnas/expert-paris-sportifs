@@ -1025,6 +1025,7 @@ def find_value_bets_ultimate(analysis):
                 "type": bet_code,
                 "type_name": bet_info["name"],
                 "prob": calibrated_prob,
+                "fair_odds": round(1.0 / calibrated_prob, 2) if calibrated_prob > 0 else 0,
                 "odds": market_odds,
                 "odds_source": "RÉELLE",
                 "ev": ev,
@@ -1727,7 +1728,7 @@ def main():
         print("\n📱 Envoi alertes Telegram...")
         if top_recommendations:
             send_telegram(
-                f"📊 <b>{stats['value_bets']} value bet(s)</b> sur "
+                f"📊 <b>{stats['value_bets']} sélection(s)</b> sur "
                 f"{stats['total_matches']} matchs analysés\n"
                 f"📈 Historique: {tracking_stats.get('total_bets', 0)} paris | "
                 f"ROI {tracking_stats.get('roi', 0):+.1f}% | "
@@ -1735,16 +1736,19 @@ def main():
             )
             for rec in top_recommendations[:MAX_BETS_PER_EMAIL]:
                 bet = rec["bet"]
-                msg = f"""🎯 <b>ALERTE VALUE BET</b>
+                msg = f"""🎯 <b>ANALYSE MATCH</b>
 
 ⚽ {rec['match']}
 🏆 {rec['comp_flag']} {rec['comp_name']}
 📅 {rec['date']}
 
-💰 <b>{bet['type']}</b> @ <b>{bet['odds']:.2f}</b>
-📈 Edge: <b>+{bet['edge']:.1f}%</b>
-🎲 Confiance: {bet['confidence']}%
-💵 Mise suggérée: <b>{bet['stake']:.0f}€</b>
+💰 Pari: <b>{bet['type']}</b> ({bet['type_name']})
+🎲 Proba estimée: {bet['confidence']}%
+⚖️ Cote juste (seuil): <b>{bet['fair_odds']:.2f}</b>
+
+🎯 À la FDJ (tabac), ne misez que si la cote
+   affichée est <b>supérieure à {bet['fair_odds']:.2f}</b>.
+   (référence en ligne: {bet['odds']:.2f})
 
 {rec['weather'].get('icon', '')} {rec['weather'].get('description', '')}"""
                 if send_telegram(msg.strip()):
