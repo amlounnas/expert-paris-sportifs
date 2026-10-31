@@ -117,8 +117,8 @@ MIN_CONFIDENCE = 45
 # Corrige la sur-confiance systématique du modèle (backtest: +8pt d'écart, ROI -51.6%).
 MARKET_WEIGHT = 0.60
 # Dixon-Coles: correction des petits scores (0-0, 1-0, 0-1, 1-1 plus fréquents que
-# ne le prédit un Poisson indépendant). ρ négatif ~ -0.13 (Dixon & Coles 1997).
-RHO = -0.13
+# ne le prédit un Poisson indépendant). ρ estimé par MLE sur 5562 matchs (fit.py).
+RHO = -0.05
 MAX_BETS_PER_EMAIL = 5
 
 # Tracking file (dans le repo GitHub)
@@ -865,12 +865,13 @@ def analyze_match_ultimate(match, standings, recent_form, league_avg, real_odds,
     away_attack_strength = away_stats["attack"] / avg_goals
     away_defense_strength = away_stats["defense"] / avg_goals
 
-    # Avantage domicile de base (réduit: l'empilement multiplicatif gonflait l'xG)
-    home_advantage = 1.10
+    # Avantage domicile (Dixon-Coles asymétrique, γ=+0.215 fit sur 5562 matchs):
+    # home ×exp(γ), away inchangé. L'ancien ×1.10 symétrique sous-estimait le domicile.
+    home_advantage = 1.24
 
     # xG de base
     home_xg = avg_goals * home_attack_strength * away_defense_strength * home_advantage
-    away_xg = avg_goals * away_attack_strength * home_defense_strength / home_advantage
+    away_xg = avg_goals * away_attack_strength * home_defense_strength
 
     # ============== NOUVEAUX FACTEURS ML ==============
 
