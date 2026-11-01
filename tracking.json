@@ -1,0 +1,13 @@
+{
+  "bets": [],
+  "stats": {
+    "total": 0,
+    "won": 0,
+    "lost": 0,
+    "pending": 0,
+    "profit": 0,
+    "staked": 0,
+    "roi": 0,
+    "avg_clv": 0.0
+  }
+}
