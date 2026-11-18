@@ -1,10 +1,32 @@
 {
-  "bets": [],
+  "bets": [
+    {
+      "id": "1130faff",
+      "date": "2026-11-18T00:39:19.718009",
+      "match": "Coventry City FC vs Crystal Palace FC",
+      "match_date": "21/11 15:00",
+      "match_iso": "2026-11-21T15:00:00+00:00",
+      "home": "Coventry City FC",
+      "away": "Crystal Palace FC",
+      "competition": "Premier League",
+      "competition_code": "PL",
+      "bet_type": "1",
+      "odds": 2.54,
+      "opening_odds": 2.54,
+      "latest_odds": 2.54,
+      "stake": 32.39,
+      "prob": 0.4722646782014444,
+      "ev": 1.199552282631669,
+      "status": "pending",
+      "result": null,
+      "profit": null
+    }
+  ],
   "stats": {
-    "total": 0,
+    "total": 1,
     "won": 0,
     "lost": 0,
-    "pending": 0,
+    "pending": 1,
     "profit": 0,
     "staked": 0,
     "roi": 0,
