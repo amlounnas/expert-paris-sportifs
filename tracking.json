@@ -17,19 +17,20 @@
       "stake": 32.39,
       "prob": 0.4722646782014444,
       "ev": 1.199552282631669,
-      "status": "pending",
-      "result": null,
-      "profit": null
+      "status": "won",
+      "result": "3-2",
+      "profit": 49.88,
+      "clv": 0.0236
     }
   ],
   "stats": {
     "total": 1,
-    "won": 0,
+    "won": 1,
     "lost": 0,
-    "pending": 1,
-    "profit": 0,
-    "staked": 0,
-    "roi": 0,
-    "avg_clv": 0.0
+    "pending": 0,
+    "profit": 49.88,
+    "staked": 32.39,
+    "roi": 154.0,
+    "avg_clv": 2.36
   }
 }
